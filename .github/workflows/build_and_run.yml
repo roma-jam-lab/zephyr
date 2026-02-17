@@ -47,6 +47,7 @@ jobs:
                      -r zephyr/scripts/requirements-build-test.txt
 
           west init -l zephyr
+          west sdk install
           west update hal_espressif zephyr
           west zephyr-export
 
