@@ -1,0 +1,7 @@
+- connected: true
+  id: /dev/ttyACM0
+  platform: esp32s3_devkitc/esp32s3/procpu
+  product: "ESP32-S3 DevKitC"
+  runner: esp32
+  serial: /dev/ttyACM0
+  flash_before: true

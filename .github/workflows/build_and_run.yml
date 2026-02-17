@@ -11,85 +11,116 @@ permissions:
 jobs:
   build:
     if: startsWith(github.head_ref, 'pr-add-ci-') || startsWith(github.head_ref, 'pr-add-dwc2-')
-    runs-on: ubuntu-latest
 
+    strategy:
+      matrix: 
+        zephyr_cont_ver: [ "latest" ]
+
+    runs-on: ubuntu-latest
     container:
-      image: zephyrprojectrtos/ci:v0.28.7
+      image: zephyrprojectrtos/ci:${{ matrix.zephyr_cont_ver }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Init and update west
+      - name: Configure Python requirements
+        shell: bash
         run: |
-          # mkdir -p .west
-          # cat <<EOF > .west/config
-          # [manifest]
-          # path = app
-          # file = west.yml
-          # EOF
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -U pip wheel
+          pip install -r scripts/requirements.txt -r scripts/requirements-build-test.txt
 
-          # west update -o=--depth=1 -n
-          # git config --global user.email user@git-scm.com
-          # git config --global user.name "Git User"
-          # est patch
-
-      - name: Build blinky
+      - name: West init/update
+        shell: bash
         run: |
-          # ls -lah
-          # cd deps/zephyr/samples/basic/blinky
-          # west build -b nrf52840dk_nrf52840 . -p
+          . .venv/bin/activate
+          # might be skipped as your repo is already a full zephyr workspace
+          west --version
+          west update
 
-      - name: Create build tarball (do we need it? or artifacts? why tarball?)
+      - name: Build (Produce twister-out)
+        shell: bash
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1" # TODO: workaround harness double registration?
         run: |
-          # cd deps/zephyr/samples/basic/blinky
-          # tar czf build.tar.gz build/zephyr/zephyr.hex
+          . .venv/bin/activate
+          west twister \
+            -T samples/subsys/testsuite/pytest/shell \
+            -p esp32s3_devkitc/esp32s3/procpu \
+            -s sample.pytest.shell \
+            --build-only \
+            -j 1 -v --outdir twister-out
 
-      - name: Upload tarball
+      - name: Pack twister-out artifact
+        shell: bash
+        run: |
+          tar -czf twister-out.tgz twister-out
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build.tar.gz
-          path: deps/zephyr/samples/basic/blinky/build.tar.gz
+          name: twister-out
+          path: twister-out.tgz
+          if-no-files-found: error
 
   run:
-    needs: build
     if: startsWith(github.head_ref, 'pr-add-ci-') || startsWith(github.head_ref, 'pr-add-dwc2-')
-    runs-on: [self-hosted, nRF54LM20]
-
-    defaults:
-      run:
-        shell: bash
-        working-directory: blinky-test
+    runs-on: [ self-hosted, esp32s3 ]
+    needs: [ build ]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          path: blinky-test
+          fetch-depth: 0
 
-      - name: Download build tarball
+      - name: Download twister-out artifact
         uses: actions/download-artifact@v4
         with:
-          name: build.tar.gz
-          path: blinky-test/samples/blinky
+          name: twister-out
 
-      - name: Untar
+      - name: Unpack twister-out
+        shell: bash
         run: |
-          cd samples/blinky
-          tar xvf build.tar.gz
+          rm -rf twister-out
+          tar -xzf twister-out.tgz
 
-      - name: Flash and Verify Test Results
+      - name: Python venv + requirements (clean)
+        shell: bash
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -U pip wheel
+          pip install -r scripts/requirements.txt -r scripts/requirements-build-test.txt
+
+      - name: Run on hardware
+        shell: bash
         env:
-          CI_NRF52840DK_SNR: ${{ secrets.CI_NRF52840DK_SNR }}
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          cd samples/blinky
+          . .venv/bin/activate
 
-          # Check serial number of board from GitHub Repo Secret
-          echo $CI_NRF52840DK_SNR
+          # Important: --test-only reuses builds in twister-out from previous job.
+          # --device-testing + --hardware-map selects your DUT and flashes/runs it.
+          west twister \
+            -T samples/subsys/testsuite/pytest/shell \
+            -p esp32s3_devkitc/esp32s3/procpu \
+            -s sample.pytest.shell \
+            --test-only \
+            --device-testing \
+            --hardware-map tests/hil/hw/esp32s3/map-esp32s3.yml \
+            -j 1 -v --outdir twister-out
 
-          # nrfjprog --recover -f NRF52 --snr $CI_NRF52840DK_SNR
-          # nrfjprog --eraseall -f NRF52 --snr $CI_NRF52840DK_SNR
-          # nrfjprog --program build/zephyr/zephyr.hex --verify -f NRF52 --snr $CI_NRF52840DK_SNR
-          # nrfjprog --pinresetenable -f NRF52 --snr $CI_NRF52840DK_SNR
-          # nrfjprog --pinreset -f NRF52 --snr $CI_NRF52840DK_SNR
-          # sleep 3
+      - name: Upload Twister reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: twister-reports
+          path: |
+            twister-out/twister.xml
+            twister-out/twister_report.xml
+            twister-out/twister.json
