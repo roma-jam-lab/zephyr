@@ -33,11 +33,25 @@ jobs:
           which xtensa-esp32s3-elf-gcc || true
           which riscv32-esp-elf-gcc || true
 
+      - name: Install build tools (cmake, ninja, dtc, etc.)
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            cmake ninja-build gperf ccache \
+            device-tree-compiler \
+            python3-dev python3-pip python3-venv \
+            git wget xz-utils file \
+            dfu-util
+          rm -rf /var/lib/apt/lists/*
+
       - name: Setup Zephyr west workspace + Python deps
         shell: bash
         run: |
-          . ${IDF_PATH}/export.sh
-          
+          cd /__w/${{ github.repository }}/__w/${{ github.repository }} || true
+          # In Actions containers, $GITHUB_WORKSPACE is set; use it reliably:
+          cd "$GITHUB_WORKSPACE"
+
           cd ws
           # Create workspace metadata
           python3 -m venv .venv-zephyr
@@ -47,7 +61,6 @@ jobs:
                      -r zephyr/scripts/requirements-build-test.txt
 
           west init -l zephyr
-          west sdk install
           west update hal_espressif zephyr
           west zephyr-export
 
