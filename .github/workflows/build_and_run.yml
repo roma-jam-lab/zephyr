@@ -126,7 +126,9 @@ jobs:
         run: |
           . ws/.venv/bin/activate
           cd ws
-          west init -l zephyr
+          if [ ! -d .west ]; then
+            west init -l zephyr
+          fi
           west update hal_espressif
           west zephyr-export
 
