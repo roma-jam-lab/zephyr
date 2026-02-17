@@ -127,7 +127,7 @@ jobs:
           . ws/.venv/bin/activate
           cd ws
           west init -l zephyr
-          west update hal_espressif zephyr
+          west update hal_espressif
           west zephyr-export
 
       - name: Download twister-out artifact
