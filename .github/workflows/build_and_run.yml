@@ -77,6 +77,9 @@ jobs:
           . ws/.venv-zephyr/bin/activate
 
           cd ws/zephyr
+
+          export ZEPHYR_TOOLCHAIN_VARIANT=espressif
+          
           west twister \
             -T samples/subsys/testsuite/pytest/shell \
             -p esp32s3_devkitc/esp32s3/procpu \
