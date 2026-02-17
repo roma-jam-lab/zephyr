@@ -39,9 +39,6 @@ jobs:
           . ${IDF_PATH}/export.sh
           
           cd ws
-          # Create workspace metadata
-          python3 -m venv .venv-zephyr
-          . .venv-zephyr/bin/activate
           pip install -U pip wheel
           pip install -r zephyr/scripts/requirements.txt \
                      -r zephyr/scripts/requirements-build-test.txt
@@ -55,13 +52,8 @@ jobs:
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
         run: |
-          cd "$GITHUB_WORKSPACE"
-          # Activate IDF env (toolchain + python path)
           . ${IDF_PATH}/export.sh
-
-          # Activate Zephyr venv (west + python deps)
-          . ws/.venv-zephyr/bin/activate
-
+          
           cd ws/zephyr
           west twister \
             -T samples/subsys/testsuite/pytest/shell \
