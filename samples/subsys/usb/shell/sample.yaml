@@ -47,3 +47,12 @@ tests:
     platform_allow:
       - native_sim/native/64
     build_only: true
+  sample.usbh.shell.hil:
+    harness: pytest
+    tags:
+      - usb
+      - shield
+    extra_args:
+      - CONF_FILE="host_prj.conf"
+    platform_allow:
+      - esp32s3_devkitc/esp32s3/procpu
