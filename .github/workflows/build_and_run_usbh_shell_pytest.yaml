@@ -1,0 +1,186 @@
+name: Build and Run
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        zephyr_ver: ["v0.29.2"]
+    container:
+      image: ghcr.io/zephyrproject-rtos/ci:${{ matrix.zephyr_ver }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: ws/zephyr
+          fetch-depth: 0
+
+      - name: Setup Python deps (west + twister requirements)
+        shell: bash
+        run: |
+          python3 -m venv "$GITHUB_WORKSPACE/ws/.venv"
+          . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
+          pip install -U pip wheel
+          pip install -r "$GITHUB_WORKSPACE/ws/zephyr/scripts/requirements.txt" \
+                     -r "$GITHUB_WORKSPACE/ws/zephyr/scripts/requirements-build-test.txt"
+
+      - name: West init/update/export (modules + blobs)
+        shell: bash
+        run: |
+          . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
+          cd "$GITHUB_WORKSPACE/ws"
+          west init -l zephyr
+          west update hal_espressif
+          west blobs fetch hal_espressif
+          west zephyr-export
+
+      - name: Locate Zephyr SDK in container
+        shell: bash
+        run: |
+          # Common locations used by Zephyr CI images; pick the first that exists.
+          for d in /opt/zephyr-sdk* /opt/toolchains/zephyr-sdk* /usr/local/zephyr-sdk*; do
+          if [ -d "$d" ]; then
+            echo "Found Zephyr SDK at $d"
+            echo "ZEPHYR_SDK_INSTALL_DIR=$d" >> $GITHUB_ENV
+          break
+          fi
+          done
+
+      - name: Twister build-only (ESP32S3)
+        shell: bash
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          ZEPHYR_TOOLCHAIN_VARIANT: zephyr
+        run: |
+          . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
+          cd "$GITHUB_WORKSPACE/ws/zephyr"
+
+          west twister -T samples/subsys/usb/shell --list-tests
+
+          west twister \
+            -T samples/subsys/usb/shell \
+            -p esp32s3_devkitc/esp32s3/procpu \
+            -s sample.usbh.shell.hil \
+            --build-only \
+            -j 1 \
+            --outdir "$GITHUB_WORKSPACE/twister-out"
+
+      - name: Pack twister-out artifact
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          tar -czf twister-out.tgz twister-out
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: twister-out
+          path: twister-out.tgz
+          if-no-files-found: error
+
+  run:
+    if: startsWith(github.head_ref, 'pr-add-')
+    runs-on: [self-hosted, docker, esp32s3, usb_host]
+    strategy:
+      matrix:
+        zephyr_ver: ["v0.29.2"]
+    container:
+      image: ghcr.io/zephyrproject-rtos/ci:${{ matrix.zephyr_ver }}
+      options: >-
+        --volume=/etc/zephyr:/etc/zephyr:ro
+        --device=/dev/ttyACM0
+    needs: [build]
+
+    steps:
+      - name: Checkout (workspace layout)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: ws/zephyr
+          fetch-depth: 0
+
+      - name: Python venv + requirements (clean)
+        shell: bash
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/ws/.venv"
+          python3 -m venv "$GITHUB_WORKSPACE/ws/.venv"
+          . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
+          pip install -U pip wheel esptool pyserial
+          pip install -r "$GITHUB_WORKSPACE/ws/zephyr/scripts/requirements.txt" \
+                     -r "$GITHUB_WORKSPACE/ws/zephyr/scripts/requirements-build-test.txt"
+
+      - name: West init/update/export (runner, idempotent)
+        shell: bash
+        run: |
+          . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
+          cd "$GITHUB_WORKSPACE/ws"
+          if [ ! -d .west ]; then
+            west init -l zephyr
+          fi
+          west zephyr-export
+
+      - name: Download twister-out artifact
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: twister-out
+          path: ${{ github.workspace }}
+
+      - name: Unpack twister-out
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          rm -rf twister-out
+          tar -xzf twister-out.tgz
+
+      - name: Locate Zephyr SDK in container
+        shell: bash
+        run: |
+          # Common locations used by Zephyr CI images; pick the first that exists.
+          for d in /opt/zephyr-sdk* /opt/toolchains/zephyr-sdk* /usr/local/zephyr-sdk*; do
+          if [ -d "$d" ]; then
+            echo "Found Zephyr SDK at $d"
+            echo "ZEPHYR_SDK_INSTALL_DIR=$d" >> $GITHUB_ENV
+          break
+          fi
+          done
+
+      - name: Run on hardware (test-only)
+        shell: bash
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          ZEPHYR_TOOLCHAIN_VARIANT: zephyr
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/ws/zephyr"
+
+          . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
+          cd "$GITHUB_WORKSPACE/ws/zephyr"
+
+          west twister \
+            -T samples/subsys/usb/shell \
+            -p esp32s3_devkitc/esp32s3/procpu \
+            -s sample.usbh.shell.hil \
+            --test-only \
+            --device-testing \
+            --hardware-map /etc/zephyr/hardware-map-esp32s3.yml \
+            -j 1 \
+            --log-level debug \
+            --outdir "$GITHUB_WORKSPACE/twister-out"
+
+      - name: Upload Twister reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: twister-reports
+          path: |
+            twister-out/**/twister_harness.log
+            twister-out/twister.xml
+            twister-out/twister_report.xml
+            twister-out/twister.json
