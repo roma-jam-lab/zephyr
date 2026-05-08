@@ -1,0 +1,10 @@
+tests:
+  drivers.usb.uhc.control:
+    tags:
+      - drivers
+      - usb
+      - uhc
+    platform_allow:
+      - esp32s3_devkitc/esp32s3/procpu
+      - nrf54lm20dk/nrf54lm20b/cpuapp
+    harness: ztest
