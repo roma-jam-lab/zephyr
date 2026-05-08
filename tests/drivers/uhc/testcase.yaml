@@ -1,0 +1,6 @@
+tests:
+  drivers.usb.uhc:
+    tags:
+      - drivers
+    platform_allow:
+      - esp32s3_devkitc/esp32s3/procpu
