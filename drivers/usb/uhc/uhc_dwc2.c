@@ -22,7 +22,7 @@ LOG_MODULE_REGISTER(uhc_dwc2, CONFIG_UHC_DRIVER_LOG_LEVEL);
 #define RESET_HOLD_MS		CONFIG_UHC_DWC2_RESET_HOLD_MS
 #define RESET_RECOVERY_MS	CONFIG_UHC_DWC2_RESET_RECOVERY_MS
 #define SET_ADDR_DELAY_MS	CONFIG_UHC_DWC2_SET_ADDR_DELAY_MS
-#define MAX_CHANNELS		CONFIG_UHC_DWC2_MAX_CHANNELS
+#define MAX_CHANNELS		16
 
 enum uhc_dwc2_event {
 	/* A device has been connected to the port */
@@ -107,6 +107,7 @@ struct uhc_dwc2_data {
 	struct uhc_dwc2_channel ch[MAX_CHANNELS];
 	/* Channels specific transfer related parameters */
 	struct uhc_dwc2_channel_data ch_data[2][MAX_CHANNELS];
+	uint32_t numhstchnl;
 	/* Root Port flags */
 	uint8_t debouncing: 1;
 	uint8_t has_device: 1;
@@ -264,6 +265,7 @@ static void dwc2_config_timings(struct usb_dwc2_reg *const base)
 static inline int dwc2_core_init_host_gusbcfg(const struct device *dev)
 {
 	const struct uhc_dwc2_config *const config = dev->config;
+	struct uhc_dwc2_data *const data = uhc_get_private(dev);
 	struct usb_dwc2_reg *const base = config->base;
 	uint32_t gusbcfg = sys_read32((mem_addr_t)&base->gusbcfg);
 	uint32_t ghwcfg2 = sys_read32((mem_addr_t)&base->ghwcfg2);
@@ -282,6 +284,13 @@ static inline int dwc2_core_init_host_gusbcfg(const struct device *dev)
 				sys_read32((mem_addr_t)&base->gintsts));
 			return -ETIMEDOUT;
 		}
+	}
+
+	/* Store the actual number of channels */
+	data->numhstchnl = usb_dwc2_get_ghwcfg2_numhstchnl(ghwcfg2) + 1;
+	LOG_DBG("Number of Host Channels %u", data->numhstchnl);
+	if (data->numhstchnl > MAX_CHANNELS) {
+		return -EIO;
 	}
 
 	if (usb_dwc2_get_ghwcfg2_hsphytype(ghwcfg2) == USB_DWC2_GHWCFG2_HSPHYTYPE_NO_HS) {
@@ -920,13 +929,38 @@ static int ch_claim(const struct device *const dev,
 	struct uhc_dwc2_data *const priv = uhc_get_private(dev);
 	uint8_t ep_dir_idx = USB_EP_DIR_IS_IN(xfer->ep) ? 1 : 0;
 	uint8_t ep_num = USB_EP_GET_IDX(xfer->ep);
+	struct uhc_dwc2_channel *ch = NULL;
 
-	/* TODO: select non-claimed channel, use channel 0 for now */
-	uint8_t idx = 0;
-	struct uhc_dwc2_channel *const ch = &priv->ch[idx];
+	/*
+	 * A non-NULL xfer marks the channel as busy. Scan all channels:
+	 * remember the first free one, but only after making sure the endpoint
+	 * is not already in flight.
+	 */
+	for (uint8_t idx = 0; idx < priv->numhstchnl; idx++) {
+		struct uhc_dwc2_channel *const cand = &priv->ch[idx];
 
-	LOG_DBG("Claimed channel%d for ep=%02Xh, xfer=%p, channel=%p",
-		idx, xfer->ep, (void *)xfer, (void *)ch);
+		if (cand->xfer == NULL) {
+			if (ch == NULL) {
+				ch = cand;
+			}
+			continue;
+		}
+
+		if (cand->xfer->udev->addr == xfer->udev->addr &&
+		    cand->xfer->ep == xfer->ep) {
+			LOG_DBG("Endpoint %0x02x on addr %u already busy",
+				xfer->ep, xfer->udev->addr);
+			return -EBUSY;
+		}
+	}
+
+	if (ch == NULL) {
+		LOG_DBG("No free channel for ep=%02Xh", xfer->ep);
+		return -EBUSY;
+	}
+
+	LOG_DBG("Claimed channel%d for ep 0x%02x, xfer=%p, channel=%p",
+		ch->index, xfer->ep, (void *)xfer, (void *)ch);
 
 	/* Save channel characteristics of the underlying channel */
 	ch->xfer = xfer;
