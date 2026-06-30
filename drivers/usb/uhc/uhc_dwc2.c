@@ -35,6 +35,8 @@ enum uhc_dwc2_event {
 	UHC_DWC2_EVENT_PORT_ERROR,
 	/* Overcurrent detected */
 	UHC_DWC2_EVENT_PORT_OVERCURRENT,
+	/* A queued transfer has been marked for cancellation */
+	UHC_DWC2_EVENT_DEQUEUE,
 	/* Port has pending channel event */
 	UHC_DWC2_EVENT_PORT_PEND_CHANNEL
 };
@@ -52,6 +54,8 @@ enum uhc_dwc2_channel_event {
 	UHC_DWC2_CHANNEL_DO_REINIT,
 	/* Need to rewind the buffer being transmitted. Channel is now halted */
 	UHC_DWC2_CHANNEL_DO_REWIND,
+	/* The transfer was cancelled. Channel is now halted */
+	UHC_DWC2_CHANNEL_EVENT_CANCELLED,
 };
 
 #define EPSIZE_BULK_FS			64U
@@ -83,6 +87,8 @@ struct uhc_dwc2_channel {
 	uint8_t index;
 	/* Accessed in ISR. Number of error to track errors for transactions. */
 	uint8_t error_count;
+	/* Set while a halt was initiated to cancel the transfer. */
+	bool halt_cancel;
 	/* Used to save pending completion bits, while waiting channel to be halted. */
 	uint32_t hcint_cplt_pending;
 	/* Cached pointer to channel registers */
@@ -823,6 +829,16 @@ static uint32_t ch_handle_irq_events(struct uhc_dwc2_channel *ch)
 
 	LOG_DBG("HCINT 0x%08x", hcint);
 
+	if (ch->halt_cancel) {
+		/* A halt was initiated to cancel this transfer. */
+		if (hcint & USB_DWC2_HCINT_CHHLTD) {
+			return BIT(UHC_DWC2_CHANNEL_EVENT_CANCELLED) |
+			       BIT(UHC_DWC2_CHANNEL_DO_RELEASE);
+		}
+
+		return 0U;
+	}
+
 	if ((hcint & USB_DWC2_HCINT_CPLT_BITS) != 0U ||
 	    ch->hcint_cplt_pending != 0) {
 		/*
@@ -1074,9 +1090,48 @@ static void ch_release(const struct device *dev, struct uhc_dwc2_channel *ch)
 	/* Release channel */
 	ch->xfer = NULL;
 	ch->data = NULL;
+	ch->halt_cancel = false;
 	priv->free_chs++;
 
 	LOG_DBG("Released channel%d", ch->index);
+}
+
+/*
+ * Initiate halting an enabled channel to cancel its transfer.
+ *
+ * Returns true if a halt was started and the CHHLTD interrupt is expected, or
+ * false if the channel was not running and the caller must finish the
+ * cancellation itself.
+ */
+static bool ch_halt_initiate(struct uhc_dwc2_channel *ch)
+{
+	uint32_t hcchar;
+
+	/* Halt already initiated for this channel */
+	if (ch->halt_cancel) {
+		return true;
+	}
+
+	/*
+	 * Leave only Channel Halted enabled and clear any other pending
+	 * channel interrupt, so a cancelled transfer's status bits cannot take
+	 * effect.
+	 */
+	sys_write32(USB_DWC2_HCINT_CHHLTD, (mem_addr_t)&ch->regs->hcintmsk);
+	sys_write32((uint32_t)~USB_DWC2_HCINT_CHHLTD, (mem_addr_t)&ch->regs->hcint);
+
+	hcchar = sys_read32((mem_addr_t)&ch->regs->hcchar);
+	if (!(hcchar & USB_DWC2_HCCHAR_CHENA)) {
+		/* Channel is not running, no Channel Halted interrupt will be raised */
+		return false;
+	}
+
+	ch->halt_cancel = true;
+
+	hcchar |= USB_DWC2_HCCHAR_CHENA | USB_DWC2_HCCHAR_CHDIS;
+	sys_write32(hcchar, (mem_addr_t)&ch->regs->hcchar);
+
+	return true;
 }
 
 static void ch_start_control(struct uhc_dwc2_channel *ch)
@@ -1517,13 +1572,21 @@ static void ch_handle_events(const struct device *dev, struct uhc_dwc2_channel *
 	struct uhc_transfer *const xfer = ch->xfer;
 	int err = -EIO;
 
-	__ASSERT_NO_MSG(xfer != NULL);
+	if (xfer == NULL) {
+		/*
+		 * The channel was released while its event was already raised,
+		 * for example the transfer was dequeued.
+		 */
+		return;
+	}
 
 	LOG_DBG("Thread channel%d events: %08Xh", ch->index, events);
 
 	if (events & BIT(UHC_DWC2_CHANNEL_DO_RELEASE)) {
-		/* ERROR, STALL and COMPLETE are mutually exclusive */
-		if (events & BIT(UHC_DWC2_CHANNEL_EVENT_ERROR)) {
+		/* CANCELLED, ERROR, STALL and COMPLETE are mutually exclusive */
+		if (events & BIT(UHC_DWC2_CHANNEL_EVENT_CANCELLED)) {
+			err = -ECONNRESET;
+		} else if (events & BIT(UHC_DWC2_CHANNEL_EVENT_ERROR)) {
 			err = -EIO;
 		} else if (events & BIT(UHC_DWC2_CHANNEL_EVENT_STALL)) {
 			err = -EPIPE;
@@ -1639,6 +1702,71 @@ static void uhc_dwc2_isr_handler(const struct device *dev)
 	(void)uhc_dwc2_quirk_irq_clear(dev);
 }
 
+/*
+ * Process transfers marked for cancellation by uhc_dwc2_dequeue(). Runs in the
+ * driver thread, so it owns all channel state. The transfer's channel is
+ * halted and released with the controller interrupt disabled, so the ISR
+ * cannot read or post an event for a channel being torn down.
+ */
+static void dequeue_cancelled(const struct device *dev)
+{
+	const struct uhc_dwc2_config *const config = dev->config;
+	struct uhc_dwc2_data *const priv = uhc_get_private(dev);
+	struct uhc_data *const data = dev->data;
+	struct uhc_transfer *xfer, *tmp;
+
+	SYS_DLIST_FOR_EACH_CONTAINER_SAFE(&data->ctrl_xfers, xfer, tmp, node) {
+		struct uhc_dwc2_channel *ch = NULL;
+		bool halting = false;
+
+		if (xfer->err != -ECONNRESET) {
+			continue;
+		}
+
+		/* Find the channel the transfer is assigned to, if any */
+		for (uint32_t idx = 0; idx < priv->numhstchnl; idx++) {
+			if (priv->ch[idx].xfer == xfer) {
+				ch = &priv->ch[idx];
+				break;
+			}
+		}
+
+		if (ch != NULL) {
+			/*
+			 * Initiate halting with the controller interrupt
+			 * disabled, so the ISR cannot run for this channel
+			 * concurrently.
+			 */
+			config->irq_disable_func(dev);
+
+			halting = ch_halt_initiate(ch);
+			if (!halting) {
+				/*
+				 * Channel was no longer running, finish the
+				 * teardown here.
+				 */
+				atomic_set(&ch->events, 0);
+				k_event_clear(&priv->events,
+					BIT(UHC_DWC2_EVENT_PORT_PEND_CHANNEL + ch->index));
+				ch_release(dev, ch);
+			}
+
+			config->irq_enable_func(dev);
+		}
+
+		if (halting) {
+			/*
+			 * Halt initiated and will be finished in
+			 * ch_handle_events():
+			 */
+			continue;
+		}
+
+		/* Return pending or already-stopped transfer */
+		uhc_xfer_return(dev, xfer, -ECONNRESET);
+	}
+}
+
 static void uhc_dwc2_thread(void *arg0, void *arg1, void *arg2)
 {
 	const struct device *const dev = (const struct device *)arg0;
@@ -1658,6 +1786,11 @@ static void uhc_dwc2_thread(void *arg0, void *arg1, void *arg2)
 			if (event_mask & BIT(UHC_DWC2_EVENT_PORT_PEND_CHANNEL + index)) {
 				ch_handle_events(dev, &priv->ch[index]);
 			}
+		}
+
+		/* Cancel transfers marked for dequeue */
+		if (event_mask & BIT(UHC_DWC2_EVENT_DEQUEUE)) {
+			dequeue_cancelled(dev);
 		}
 
 		/* Check if a new transfer can be started */
@@ -1736,9 +1869,27 @@ static int uhc_dwc2_enqueue(const struct device *const dev, struct uhc_transfer 
 
 static int uhc_dwc2_dequeue(const struct device *const dev, struct uhc_transfer *const xfer)
 {
-	LOG_WRN("%s has not been implemented", __func__);
+	struct uhc_dwc2_data *const priv = uhc_get_private(dev);
+	struct uhc_data *const data = dev->data;
+	struct uhc_transfer *tmp;
 
-	return -ENOSYS;
+	uhc_lock_internal(dev, K_FOREVER);
+
+	/*
+	 * Mark the queued transfer as cancelled. The dequeue process itself
+	 * will take place in the driver's thread.
+	 */
+	SYS_DLIST_FOR_EACH_CONTAINER(&data->ctrl_xfers, tmp, node) {
+		if (tmp == xfer) {
+			tmp->err = -ECONNRESET;
+			k_event_post(&priv->events, BIT(UHC_DWC2_EVENT_DEQUEUE));
+			break;
+		}
+	}
+
+	uhc_unlock_internal(dev);
+
+	return 0;
 }
 
 static int uhc_dwc2_preinit(const struct device *const dev)
