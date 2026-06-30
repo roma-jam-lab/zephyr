@@ -108,6 +108,8 @@ struct uhc_dwc2_data {
 	/* Channels specific transfer related parameters */
 	struct uhc_dwc2_channel_data ch_data[2][MAX_CHANNELS];
 	uint32_t numhstchnl;
+	/* Number of channels currently not claimed */
+	uint32_t free_chs;
 	/* Root Port flags */
 	uint8_t debouncing: 1;
 	uint8_t has_device: 1;
@@ -948,14 +950,14 @@ static int ch_claim(const struct device *const dev,
 
 		if (cand->xfer->udev->addr == xfer->udev->addr &&
 		    cand->xfer->ep == xfer->ep) {
-			LOG_DBG("Endpoint %0x02x on addr %u already busy",
+			LOG_DBG("Endpoint 0x%02x on addr %u already busy",
 				xfer->ep, xfer->udev->addr);
 			return -EBUSY;
 		}
 	}
 
 	if (ch == NULL) {
-		LOG_DBG("No free channel for ep=%02Xh", xfer->ep);
+		LOG_DBG("No free channel for ep 0x%02x", xfer->ep);
 		return -EBUSY;
 	}
 
@@ -965,6 +967,7 @@ static int ch_claim(const struct device *const dev,
 	/* Save channel characteristics of the underlying channel */
 	ch->xfer = xfer;
 	ch->data = &priv->ch_data[ep_dir_idx][ep_num];
+	priv->free_chs--;
 
 	*ch_p = ch;
 
@@ -1063,6 +1066,7 @@ static void ch_complete(const struct device *dev, struct uhc_dwc2_channel *ch)
 static void ch_release(const struct device *dev, struct uhc_dwc2_channel *ch)
 {
 	const struct uhc_dwc2_config *const config = dev->config;
+	struct uhc_dwc2_data *const priv = uhc_get_private(dev);
 	struct usb_dwc2_reg *const base = config->base;
 
 	sys_clear_bits((mem_addr_t)&base->haintmsk, (1 << ch->index));
@@ -1070,6 +1074,7 @@ static void ch_release(const struct device *dev, struct uhc_dwc2_channel *ch)
 	/* Release channel */
 	ch->xfer = NULL;
 	ch->data = NULL;
+	priv->free_chs++;
 
 	LOG_DBG("Released channel%d", ch->index);
 }
@@ -1369,7 +1374,9 @@ static int submit_xfer(const struct device *const dev, struct uhc_transfer *cons
 
 	ret = ch_claim(dev, xfer, &ch);
 	if (ret != 0) {
-		LOG_ERR("Failed to claim channel: %d", ret);
+		if (ret != -EBUSY) {
+			LOG_ERR("Failed to claim channel: %d", ret);
+		}
 		return ret;
 	}
 
@@ -1394,6 +1401,54 @@ static int submit_xfer(const struct device *const dev, struct uhc_transfer *cons
 	}
 
 	return ret;
+}
+
+static bool xfer_is_active(struct uhc_dwc2_data *const priv,
+			   const struct uhc_transfer *const xfer)
+{
+	for (uint32_t idx = 0; idx < priv->numhstchnl; idx++) {
+		if (priv->ch[idx].xfer == xfer) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/*
+ * Walk the transfer list and start any pending transfer that can be served
+ * right now. Must be called with the internal lock (uhc_lock_internal()) held.
+ */
+static void submit_pending(const struct device *const dev)
+{
+	struct uhc_dwc2_data *const priv = uhc_get_private(dev);
+	struct uhc_data *const data = dev->data;
+	struct uhc_transfer *xfer, *tmp;
+	int ret;
+
+	SYS_DLIST_FOR_EACH_CONTAINER_SAFE(&data->ctrl_xfers, xfer, tmp, node) {
+		/* No channel can be claimed, stop walking the queue */
+		if (priv->free_chs == 0) {
+			break;
+		}
+
+		/* Skip transfers already assigned to a channel */
+		if (xfer_is_active(priv, xfer)) {
+			continue;
+		}
+
+		ret = submit_xfer(dev, xfer);
+		if (ret == -EBUSY) {
+			/* Endpoint busy, retry on next completion */
+			continue;
+		}
+
+		if (ret != 0) {
+			/* Error, return the transfer to the higher layer */
+			LOG_ERR("Dropping xfer %p, submit failed: %d", (void *)xfer, ret);
+			uhc_xfer_return(dev, xfer, ret);
+		}
+	}
 }
 
 static void port_handle_events(const struct device *dev, uint32_t event_mask)
@@ -1605,6 +1660,9 @@ static void uhc_dwc2_thread(void *arg0, void *arg1, void *arg2)
 			}
 		}
 
+		/* Check if a new transfer can be started */
+		submit_pending(dev);
+
 		uhc_unlock_internal(dev);
 	}
 }
@@ -1661,17 +1719,19 @@ static int uhc_dwc2_bus_resume(const struct device *const dev)
 
 static int uhc_dwc2_enqueue(const struct device *const dev, struct uhc_transfer *const xfer)
 {
-	int ret;
+	uhc_lock_internal(dev, K_FOREVER);
 
 	(void)uhc_xfer_append(dev, xfer);
 
-	uhc_lock_internal(dev, K_FOREVER);
-
-	ret = submit_xfer(dev, xfer);
+	/*
+	 * Try to start a new transfer. If no channel/endpoint is free it stays
+	 * in the list and is started later from the completion path.
+	 */
+	submit_pending(dev);
 
 	uhc_unlock_internal(dev);
 
-	return ret;
+	return 0;
 }
 
 static int uhc_dwc2_dequeue(const struct device *const dev, struct uhc_transfer *const xfer)
@@ -1755,6 +1815,9 @@ static int uhc_dwc2_init(const struct device *const dev)
 		LOG_ERR("Unable to configure USB global register");
 		return ret;
 	}
+
+	/* All channels are free after (re-)initialization */
+	priv->free_chs = priv->numhstchnl;
 
 	ret = dwc2_core_init_gahbcfg(dev);
 	if (ret != 0) {
