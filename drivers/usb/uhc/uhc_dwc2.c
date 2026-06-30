@@ -117,8 +117,8 @@ struct uhc_dwc2_data {
 	/* Number of channels currently not claimed */
 	uint32_t free_chs;
 	/* Root Port flags */
-	uint8_t debouncing: 1;
-	uint8_t has_device: 1;
+	bool debouncing;
+	bool has_device;
 };
 
 static inline uint32_t calc_packet_count(const uint32_t size, const uint16_t mps)
@@ -220,7 +220,7 @@ static void dwc2_config_timings(struct usb_dwc2_reg *const base)
 
 	if (hs_phy) {
 		fslspclk = USB_DWC2_HCFG_FSLSPCLKSEL_CLK3060;
-		if (gusbcfg | USB_DWC2_GUSBCFG_PHYIF_16_BIT) {
+		if (gusbcfg & USB_DWC2_GUSBCFG_PHYIF_16_BIT) {
 			phy_clock_mhz = 30U;
 		} else {
 			phy_clock_mhz = 60U;
@@ -532,7 +532,7 @@ static void port_debounce_lock(const struct device *dev)
 	sys_clear_bits((mem_addr_t)&base->gintmsk, USB_DWC2_GINTSTS_PRTINT |
 						USB_DWC2_GINTSTS_DISCONNINT);
 	/* Set the debounce lock flag */
-	priv->debouncing = 1;
+	priv->debouncing = true;
 }
 
 static void port_debounce_unlock(const struct device *dev)
@@ -542,7 +542,7 @@ static void port_debounce_unlock(const struct device *dev)
 	struct uhc_dwc2_data *const priv = uhc_get_private(dev);
 
 	/* Clear the flag */
-	priv->debouncing = 0;
+	priv->debouncing = false;
 	/* Clear Connection and disconnection interrupt in case it triggered again */
 	sys_set_bits((mem_addr_t)&base->gintsts, USB_DWC2_GINTSTS_DISCONNINT);
 	/* Clear the PRTCONNDET interrupt by writing 1 to the corresponding bit (W1C logic) */
@@ -871,10 +871,12 @@ static uint32_t ch_handle_irq_events(struct uhc_dwc2_channel *ch)
 	return ch_events;
 }
 
-static inline bool port_debounce(const struct device *dev, enum uhc_dwc2_event event)
+static inline bool port_debounce(const struct device *dev, const enum uhc_dwc2_event event)
 {
+	const bool want_connected = (event == UHC_DWC2_EVENT_PORT_CONNECTION);
 	const struct uhc_dwc2_config *config = dev->config;
 	struct usb_dwc2_reg *base = config->base;
+	bool connected;
 
 	/* Perform the debounce delay outside of the global lock */
 	uhc_unlock_internal(dev);
@@ -883,9 +885,7 @@ static inline bool port_debounce(const struct device *dev, enum uhc_dwc2_event e
 
 	uhc_lock_internal(dev, K_FOREVER);
 
-	bool connected = ((sys_read32((mem_addr_t)&base->hprt) & USB_DWC2_HPRT_PRTCONNSTS) != 0);
-	bool want_connected = (event == UHC_DWC2_EVENT_PORT_CONNECTION);
-
+	connected = ((sys_read32((mem_addr_t)&base->hprt) & USB_DWC2_HPRT_PRTCONNSTS) != 0);
 	port_debounce_unlock(dev);
 
 	/* True if stable state matches the event */
@@ -1261,7 +1261,7 @@ static inline void submit_new_device(const struct device *dev)
 		break;
 	}
 
-	priv->has_device = 1;
+	priv->has_device = true;
 }
 
 static inline void submit_dev_gone(const struct device *dev)
@@ -1273,7 +1273,7 @@ static inline void submit_dev_gone(const struct device *dev)
 	}
 
 	uhc_submit_event(dev, UHC_EVT_DEV_REMOVED, 0);
-	priv->has_device = 0;
+	priv->has_device = false;
 }
 
 static int validate_control_xfer(const struct uhc_transfer *xfer)
