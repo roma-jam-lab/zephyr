@@ -1187,6 +1187,7 @@ static void ch_start_control(struct uhc_dwc2_channel *ch)
 static void ch_start_bulk(struct uhc_dwc2_channel *ch)
 {
 	struct uhc_transfer *const xfer = ch->xfer;
+	uint8_t *dma_addr;
 	uint32_t pkt_cnt;
 	uint32_t hctsiz;
 	uint32_t hcchar;
@@ -1194,13 +1195,15 @@ static void ch_start_bulk(struct uhc_dwc2_channel *ch)
 	/* TODO: Do split */
 
 	if (USB_EP_DIR_IS_IN(xfer->ep)) {
-		/* For In, use the amount, available in buffer */
+		/* For IN, receive into the buffer tailroom */
 		ch->data_stage_size = net_buf_tailroom(xfer->buf);
+		dma_addr = net_buf_tail(xfer->buf);
 
 		LOG_DBG("BULK IN, tailroom=%u", ch->data_stage_size);
 	} else {
 		/* For Out, data size is the size of the data in buffer */
 		ch->data_stage_size = xfer->buf->len;
+		dma_addr = xfer->buf->data;
 
 		LOG_HEXDUMP_DBG(xfer->buf->data, ch->data_stage_size, "BULK OUT");
 	}
@@ -1212,7 +1215,7 @@ static void ch_start_bulk(struct uhc_dwc2_channel *ch)
 		usb_dwc2_set_hctsiz_xfersize(ch->data_stage_size);
 
 	sys_write32(hctsiz, (mem_addr_t)&ch->regs->hctsiz);
-	sys_write32((uint32_t)xfer->buf->data, (mem_addr_t)&ch->regs->hcdma);
+	sys_write32((uint32_t)dma_addr, (mem_addr_t)&ch->regs->hcdma);
 
 	/* Start transfer */
 	hcchar = sys_read32((mem_addr_t)&ch->regs->hcchar);
