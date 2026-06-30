@@ -1041,11 +1041,35 @@ static int ch_configure(const struct device *const dev, struct uhc_dwc2_channel 
 	return 0;
 }
 
+static void ch_complete_bulk(const struct device *dev, struct uhc_dwc2_channel *const ch)
+{
+	struct uhc_transfer *const xfer = ch->xfer;
+	uint32_t actual_len = ch->data_stage_size;
+	uint32_t pkt_cnt;
+
+	/* Add net buffer after IN stage */
+	if (USB_EP_DIR_IS_IN(xfer->ep)) {
+		uint32_t hctsiz = sys_read32((mem_addr_t)&ch->regs->hctsiz);
+		uint16_t remaining = usb_dwc2_get_hctsiz_xfersize(hctsiz);
+
+		/* Device may send a short packet, use the actual length */
+		actual_len = ch->data_stage_size - remaining;
+		net_buf_add(xfer->buf, actual_len);
+	}
+
+	/* Precalculate next pid based on the packets actually transferred */
+	pkt_cnt = calc_packet_count(actual_len, xfer->mps);
+	ch->data->next_pid = calc_next_pid(ch->data->next_pid, pkt_cnt);
+
+	LOG_DBG("Release channel%u, prog=%u, act=%u, len=%u, mps=%u, next_pid=%u",
+		ch->index, ch->data_stage_size, actual_len, xfer->buf->len,
+		xfer->mps, ch->data->next_pid);
+}
+
 static void ch_complete(const struct device *dev, struct uhc_dwc2_channel *ch)
 {
 	struct uhc_transfer *const xfer = ch->xfer;
 	const struct usb_setup_packet *setup;
-	uint32_t pkt_cnt;
 
 	switch (xfer->type) {
 	case USB_EP_TYPE_CONTROL:
@@ -1056,22 +1080,7 @@ static void ch_complete(const struct device *dev, struct uhc_dwc2_channel *ch)
 		}
 		break;
 	case USB_EP_TYPE_BULK:
-		/* Add net buffer after IN stage */
-		if (USB_EP_DIR_IS_IN(xfer->ep)) {
-			net_buf_add(xfer->buf, ch->data_stage_size);
-		}
-
-		/* Precalculate next pid based on the transfer packet size */
-		pkt_cnt = calc_packet_count(ch->data_stage_size, xfer->mps);
-		ch->data->next_pid = calc_next_pid(ch->data->next_pid, pkt_cnt);
-
-		LOG_DBG("Release channel%u, prog=%u, len=%u, tailroom=%u, mps=%u, next_pid=%u",
-			ch->index,
-			ch->data_stage_size,
-			xfer->buf->len,
-			net_buf_tailroom(xfer->buf),
-			xfer->mps,
-			ch->data->next_pid);
+		ch_complete_bulk(dev, ch);
 		break;
 	default:
 		/* Nothing special before release */
