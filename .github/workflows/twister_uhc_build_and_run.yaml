@@ -1,4 +1,4 @@
-name: USB UHC Driver Test (esp32s3)
+name: USB UHC Driver Test
 
 on:
   pull_request:
@@ -11,17 +11,24 @@ permissions:
 jobs:
   twister-tests:
     if: startsWith(github.head_ref, 'pr-add-') || github.event_name == 'workflow_dispatch'
-    runs-on: [self-hosted, docker, esp32s3, usb_host]
-
+    
     strategy:
       matrix:
+        platform: [esp32s3, nrf54lm20]
         zephyr_ver: ["v0.29.2"]
+        
+    runs-on: [self-hosted, docker, usb_host, "${{ matrix.platform }}"]
 
     container:
       image: ghcr.io/zephyrproject-rtos/ci:${{ matrix.zephyr_ver }}
       options: >-
         --volume=/etc/zephyr:/etc/zephyr:ro
-        --device=/dev/ttyACM0
+        --volume=/opt/nordic/bin/nrfutil:/usr/local/bin/nrfutil:ro
+        --volume=/opt/nordic/nrfutil-home:/nrfutil-home
+        --volume=/opt/SEGGER/JLink:/opt/SEGGER/JLink:ro
+        --volume=/dev:/dev
+        --device-cgroup-rule="c 166:* rmw"
+        --device-cgroup-rule="c 189:* rmw"
 
     steps:
       - name: Checkout
@@ -39,7 +46,7 @@ jobs:
           pip install -r "$GITHUB_WORKSPACE/ws/zephyr/scripts/requirements.txt" \
                      -r "$GITHUB_WORKSPACE/ws/zephyr/scripts/requirements-build-test.txt"
 
-      - name: West init/update/export (modules + blobs)
+      - name: West init/export
         shell: bash
         run: |
           . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
@@ -49,9 +56,28 @@ jobs:
             west init -l zephyr
           fi
 
+          west zephyr-export
+
+      - name: West update (ESP)
+        if: ${{ startsWith(matrix.platform, 'esp32') }}
+        shell: bash
+        run: |
+          . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
+          cd "$GITHUB_WORKSPACE/ws"
+
           west update hal_espressif
           west blobs fetch hal_espressif
-          west zephyr-export
+
+      - name: West update (nRF)
+        if: ${{ startsWith(matrix.platform, 'nrf') }}
+        shell: bash
+        run: |
+          . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
+          cd "$GITHUB_WORKSPACE/ws"
+
+          west update hal_nordic
+          west update cmsis
+          west update cmsis_6
 
       - name: Locate Zephyr SDK in container
         shell: bash
@@ -75,33 +101,30 @@ jobs:
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
           ZEPHYR_TOOLCHAIN_VARIANT: zephyr
+          HARDWARE_MAP_PATH: "/etc/zephyr/hardware-map-${{ matrix.platform }}.yml"
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE/ws/zephyr"
 
           . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
           cd "$GITHUB_WORKSPACE/ws/zephyr"
 
+          export HOME=/nrfutil-home
+          export LD_LIBRARY_PATH=/opt/SEGGER/JLink:${LD_LIBRARY_PATH:-}
+
           west twister -T tests/drivers/uhc --list-tests
 
           west twister \
-            -T tests/drivers/uhc/control \
-            -p esp32s3_devkitc/esp32s3/procpu \
-            -s drivers.usb.uhc.control \
-            --device-testing \
-            --device-serial /dev/ttyACM0 \
-            --flash-before \
-            --west-runner=esp32 \
-            --log-level debug \
-            -j 1 \
-            --outdir "$GITHUB_WORKSPACE/twister-out"
+              -T tests/drivers/uhc/control \
+              --hardware-map $HARDWARE_MAP_PATH \
+              --device-testing \
+              --log-level debug \
+              -j 1 \
+              --outdir "$GITHUB_WORKSPACE/twister-out"
 
-      - name: Upload Twister reports
+      - name: Upload twister-out
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: twister-reports
-          path: |
-            twister-out/**/twister_harness.log
-            twister-out/twister.xml
-            twister-out/twister_report.xml
-            twister-out/twister.json
+          name: twister-out-${{ matrix.platform }}
+          path: ${{ github.workspace }}/twister-out
+
