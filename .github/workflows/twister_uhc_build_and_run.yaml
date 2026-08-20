@@ -1,0 +1,130 @@
+name: USB UHC Driver Test
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  twister-tests:
+    if: startsWith(github.head_ref, 'pr-add-') || github.event_name == 'workflow_dispatch'
+    
+    strategy:
+      matrix:
+        platform: [esp32s3, nrf54lm20]
+        zephyr_ver: ["v0.29.2"]
+        
+    runs-on: [self-hosted, docker, usb_host, "${{ matrix.platform }}"]
+
+    container:
+      image: ghcr.io/zephyrproject-rtos/ci:${{ matrix.zephyr_ver }}
+      options: >-
+        --volume=/etc/zephyr:/etc/zephyr:ro
+        --volume=/opt/nordic/bin/nrfutil:/usr/local/bin/nrfutil:ro
+        --volume=/opt/nordic/nrfutil-home:/nrfutil-home
+        --volume=/opt/SEGGER/JLink:/opt/SEGGER/JLink:ro
+        --volume=/dev:/dev
+        --device-cgroup-rule="c 166:* rmw"
+        --device-cgroup-rule="c 189:* rmw"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: ws/zephyr
+          fetch-depth: 0
+
+      - name: Setup Python deps (west + twister requirements)
+        shell: bash
+        run: |
+          python3 -m venv "$GITHUB_WORKSPACE/ws/.venv"
+          . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
+          pip install -U pip wheel esptool pyserial
+          pip install -r "$GITHUB_WORKSPACE/ws/zephyr/scripts/requirements.txt" \
+                     -r "$GITHUB_WORKSPACE/ws/zephyr/scripts/requirements-build-test.txt"
+
+      - name: West init/export
+        shell: bash
+        run: |
+          . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
+          cd "$GITHUB_WORKSPACE/ws"
+
+          if [ ! -d .west ]; then
+            west init -l zephyr
+          fi
+
+          west zephyr-export
+
+      - name: West update (ESP)
+        if: ${{ startsWith(matrix.platform, 'esp32') }}
+        shell: bash
+        run: |
+          . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
+          cd "$GITHUB_WORKSPACE/ws"
+
+          west update hal_espressif
+          west blobs fetch hal_espressif
+
+      - name: West update (nRF)
+        if: ${{ startsWith(matrix.platform, 'nrf') }}
+        shell: bash
+        run: |
+          . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
+          cd "$GITHUB_WORKSPACE/ws"
+
+          west update hal_nordic
+          west update cmsis
+          west update cmsis_6
+
+      - name: Locate Zephyr SDK in container
+        shell: bash
+        run: |
+          for d in /opt/zephyr-sdk* /opt/toolchains/zephyr-sdk* /usr/local/zephyr-sdk*; do
+            if [ -d "$d" ]; then
+              echo "Found Zephyr SDK at $d"
+              echo "ZEPHYR_SDK_INSTALL_DIR=$d" >> "$GITHUB_ENV"
+              break
+            fi
+          done
+
+      - name: Clean previous Twister output
+        shell: bash
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/twister-out"
+          rm -rf "$GITHUB_WORKSPACE"/twister-out.*
+
+      - name: Build and run on hardware
+        shell: bash
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          ZEPHYR_TOOLCHAIN_VARIANT: zephyr
+          HARDWARE_MAP_PATH: "/etc/zephyr/hardware-map-${{ matrix.platform }}.yml"
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/ws/zephyr"
+
+          . "$GITHUB_WORKSPACE/ws/.venv/bin/activate"
+          cd "$GITHUB_WORKSPACE/ws/zephyr"
+
+          export HOME=/nrfutil-home
+          export LD_LIBRARY_PATH=/opt/SEGGER/JLink:${LD_LIBRARY_PATH:-}
+
+          west twister -T tests/drivers/uhc --list-tests
+
+          west twister \
+              -T tests/drivers/uhc/control \
+              --hardware-map $HARDWARE_MAP_PATH \
+              --device-testing \
+              --log-level debug \
+              -j 1 \
+              --outdir "$GITHUB_WORKSPACE/twister-out"
+
+      - name: Upload twister-out
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: twister-out-${{ matrix.platform }}
+          path: ${{ github.workspace }}/twister-out
+

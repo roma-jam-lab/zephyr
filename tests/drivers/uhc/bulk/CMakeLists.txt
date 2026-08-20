@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+cmake_minimum_required(VERSION 3.20.0)
+
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(test_uhc_bulk)
+
+target_sources(app PRIVATE
+    ../common/test_uhc_common.c
+    ../common/test_uhc_msc_common.c
+    src/test_uhc_msc.c
+)
+
+target_include_directories(app PRIVATE
+	../common
+)
