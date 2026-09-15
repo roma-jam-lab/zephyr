@@ -13,6 +13,7 @@ jobs:
     if: startsWith(github.head_ref, 'pr-add-') || github.event_name == 'workflow_dispatch'
     
     strategy:
+      fail-fast: false
       matrix:
         platform: [esp32s3, nrf54lm20]
         zephyr_ver: ["v0.29.2"]
