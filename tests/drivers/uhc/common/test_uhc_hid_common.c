@@ -100,7 +100,9 @@ static void test_uhc_hid_parse_cfg_desc(const uint8_t *buf,
 				hid->ep_in.num = ep->bEndpointAddress;
 				hid->ep_in.mps = sys_le16_to_cpu(ep->wMaxPacketSize);
 				hid->ep_in.interval = ep->bInterval;
-				hid->ep_in.desc = (struct usb_ep_descriptor *)ep;
+
+				memcpy(&hid->ep_in.desc, ep, sizeof(hid->ep_in.desc));
+
 				found_ep = true;
 			}
 		}
@@ -219,7 +221,7 @@ void test_uhc_hid_init(struct usb_device *udev,
 	test_uhc_hid_parse_cfg_desc(cfg_buf, total_len, iface_num, hid);
 
 	/* Workaround: for usbh, assign ep_desc_ptr */
-	test_uhc_assign_ep_desc_ptr(udev, hid->ep_in.num, hid->ep_in.desc);
+	test_uhc_assign_ep_desc_ptr(udev, hid->ep_in.num, &hid->ep_in.desc);
 
 	test_uhc_dev_set_config(udev, hid->cfg_value);
 }
@@ -317,9 +319,98 @@ void test_uhc_hid_interrupt_in_poll_ms(struct usb_device *udev,
 		}
 	}
 
+	ret = uhc_ep_dequeue(uhc_dev, xfer);
+	zassert_equal(ret, 0, "Interrupt IN dequeue failed: %d", ret);
+
+	test_uhc_wait_ep_request();
+
+	zassert_equal(xfer->err, -ECONNRESET,
+	      "Expected -ECONNRESET after dequeue, got %d",
+	      xfer->err);
+
+	printk("poll loop finished\n");
 
 	uhc_xfer_free(uhc_dev, xfer);
+	printk("xfer freed\n");
+
 	net_buf_unref(buf);
+	printk("buf freed\n");
+}
+
+void test_uhc_hid_interrupt_in_poll(struct usb_device *udev,
+				    const struct test_uhc_hid_info *hid,
+				    uint32_t amount_of_in_packets,
+				    void *buf,
+				    size_t len)
+{
+	const struct device *uhc_dev = test_uhc_get_dev();
+	struct uhc_transfer *xfer;
+	int ret;
+
+	zassert_not_null(udev, "udev is NULL");
+	zassert_not_null(hid, "hid is NULL");
+	zassert_not_equal(amount_of_in_packets, 0,
+			  "Interrupt IN packet count is zero");
+
+	xfer = uhc_xfer_alloc(uhc_dev,
+			      hid->ep_in.num,
+			      udev,
+			      NULL,
+			      NULL);
+	zassert_not_null(xfer,
+			 "Failed to allocate interrupt IN transfer");
+
+	xfer->buf = uhc_xfer_buf_alloc(uhc_dev, len);
+	zassert_not_null(xfer->buf,
+			 "Failed to allocate interrupt IN buffer");
+
+	for (uint32_t attempt = 0; attempt <= amount_of_in_packets; attempt++) {
+		net_buf_reset(xfer->buf);
+
+		ret = uhc_ep_enqueue(uhc_dev, xfer);
+		zassert_equal(ret, 0,
+			      "Interrupt IN enqueue failed: %d", ret);
+
+		if (attempt < amount_of_in_packets) {
+			/* Normal interrupt IN completion. */
+			test_uhc_wait_ep_request();
+
+			zassert_equal(xfer->err, 0,
+				      "Interrupt IN transfer %u failed: %d",
+				      attempt, xfer->err);
+
+			zassert_true(xfer->buf->len <= hid->ep_in.mps,
+				     "Interrupt IN length too large: %u > %u",
+				     xfer->buf->len, hid->ep_in.mps);
+
+			if (xfer->buf->len > 0) {
+				LOG_HEXDUMP_INF(xfer->buf->data, xfer->buf->len,
+					"HID interrupt IN report");
+				// memcpy(buf, xfer->buf->data,
+				//        MIN(len, xfer->buf->len));
+			}
+
+			continue;
+		}
+
+		/*
+		 * Final attempt:
+		 * enqueue a transfer and cancel it instead of waiting
+		 * for normal completion.
+		 */
+		ret = uhc_ep_dequeue(uhc_dev, xfer);
+		zassert_equal(ret, 0,
+			      "Interrupt IN dequeue failed: %d", ret);
+
+		test_uhc_wait_ep_request();
+
+		zassert_equal(xfer->err, -ECONNRESET,
+			      "Expected -ECONNRESET after dequeue, got %d",
+			      xfer->err);
+	}
+
+	uhc_xfer_buf_free(uhc_dev, xfer->buf);
+	uhc_xfer_free(uhc_dev, xfer);
 }
 
 void test_uhc_hid_get_report_desc(struct usb_device *udev,

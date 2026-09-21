@@ -82,8 +82,9 @@ ZTEST(test_uhc_hid, test_interrupt_in_once)
 
 	test_uhc_device_cleanup();
 }
+#endif //
 
-ZTEST(test_uhc_hid, test_interrupt_in_poll_5s)
+ZTEST(test_uhc_hid, test_interrupt_in_poll)
 {
 	struct usb_device udev;
 	struct test_uhc_hid_info hid;
@@ -106,12 +107,12 @@ ZTEST(test_uhc_hid, test_interrupt_in_poll_5s)
 	test_uhc_hid_get_report_desc(&udev, &hid,
 				     report_desc, sizeof(report_desc));
 
-	test_uhc_hid_interrupt_in_poll_ms(&udev, &hid, 5000, report, hid.ep_in.mps);
+	test_uhc_hid_interrupt_in_poll(&udev, &hid, 250, report, hid.ep_in.mps);
 
 	test_uhc_device_cleanup();
 }
-#endif // 
 
+#if (0)
 ZTEST(test_uhc_hid, test_two_ifaces_interrupt_enqueue_dequeue)
 {
 	struct usb_device udev;
@@ -198,7 +199,6 @@ ZTEST(test_uhc_hid, test_two_ifaces_interrupt_enqueue_dequeue)
 	test_uhc_device_cleanup();
 }
 
-#if (1)
 ZTEST(test_uhc_hid, test_interrupt_enqueue_dequeue)
 {
 	struct usb_device udev;

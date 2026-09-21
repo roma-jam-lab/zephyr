@@ -12,8 +12,8 @@ struct test_uhc_hid_ep_intr {
 	uint8_t num;
 	uint16_t mps;
 	uint8_t interval;
-	/** Pointer to the endpoint descriptor */
-	struct usb_ep_descriptor *desc;
+	/** Endpoint descriptor */
+	struct usb_ep_descriptor desc;
 };
 
 struct test_uhc_hid_info {
@@ -36,6 +36,12 @@ void test_uhc_hid_interrupt_in_poll_ms(struct usb_device *udev,
 				    const struct test_uhc_hid_info *hid,
 				    uint32_t msec,
 				    void *buf, 
+				    size_t len);
+
+void test_uhc_hid_interrupt_in_poll(struct usb_device *udev,
+				    const struct test_uhc_hid_info *hid,
+				    uint32_t amount_of_in_packets,
+				    void *buf,
 				    size_t len);
 
 void test_uhc_hid_get_report_desc(struct usb_device *udev,
