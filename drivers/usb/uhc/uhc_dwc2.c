@@ -874,6 +874,7 @@ static inline void ch_process_control(const struct device *dev,
 			/* No DATA stage. Go straight to STATUS */
 			next_dir_is_in = true;
 			xfer->stage = UHC_CONTROL_STAGE_STATUS;
+			ch->data->next_pid = USB_DWC2_HCTSIZ_PID_DATA1;
 		} else {
 			/* DATA stage is present */
 			next_dir_is_in = usb_reqtype_is_to_host(setup);
@@ -953,6 +954,11 @@ static inline void ch_process_control(const struct device *dev,
 				ch->length = size;
 				dma_addr = (mem_addr_t)net_buf_tail(xfer->buf);
 
+#if (1)
+				pkt_cnt  = calc_packet_count(size, xfer->mps);
+				ch->data->next_pid = calc_next_pid(ch->data->next_pid, pkt_cnt);
+				goto start_transfer;
+#else
 				/* Calculate new packet count */
 				pkt_cnt  = calc_packet_count(size, xfer->mps);
 
@@ -994,6 +1000,7 @@ static inline void ch_process_control(const struct device *dev,
 				hcchar &= ~USB_DWC2_HCCHAR_CHDIS;
 				sys_write32(hcchar, (mem_addr_t)&ch->regs->hcchar);
 				return;
+#endif //
 			}
 
 			/*
@@ -1012,9 +1019,10 @@ static inline void ch_process_control(const struct device *dev,
 
 		next_dir_is_in = !usb_reqtype_is_to_host(setup);
 		xfer->stage = UHC_CONTROL_STAGE_STATUS;
+		ch->data->next_pid = USB_DWC2_HCTSIZ_PID_DATA1;
 	}
 
-// start_transfer:
+start_transfer:
 
 	/* Calculate new packet count */
 	pkt_cnt  = calc_packet_count(size, xfer->mps);
@@ -1025,7 +1033,7 @@ static inline void ch_process_control(const struct device *dev,
 		sys_clear_bits((mem_addr_t)&ch->regs->hcchar, USB_DWC2_HCCHAR_EPDIR);
 	}
 
-	hctsiz = usb_dwc2_set_hctsiz_pid(USB_DWC2_HCTSIZ_PID_DATA1) |
+	hctsiz = usb_dwc2_set_hctsiz_pid(ch->data->next_pid /* USB_DWC2_HCTSIZ_PID_DATA1 */) |
 		usb_dwc2_set_hctsiz_pktcnt(pkt_cnt) |
 		usb_dwc2_set_hctsiz_xfersize(size);
 
