@@ -17,7 +17,6 @@ LOG_MODULE_REGISTER(test_uhc_control, LOG_LEVEL_INF);
 #define UHC_TEST_ENUM_CONFIG		1
 #define UHC_TEST_ENUM_ATTEMPTS          10
 
-#if (0)
 ZTEST(uhc_control, test_data_stage_without_buf_fails)
 {
 	const struct device *uhc_dev;
@@ -146,7 +145,6 @@ ZTEST(uhc_control, test_get_cfg_desc_buf_size_less_than_wLength_fails)
 
 	test_uhc_device_cleanup();
 }
-#endif
 
 ZTEST(uhc_control, test_get_cfg_desc_header_and_full)
 {
