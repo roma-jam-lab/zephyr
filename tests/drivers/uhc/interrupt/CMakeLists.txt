@@ -9,7 +9,9 @@ project(test_uhc_interrupt)
 target_sources(app PRIVATE
     ../common/test_uhc_common.c
     ../common/test_uhc_hid_common.c
-    src/test_uhc_hid.c
+    ../common/test_uhc_hub_common.c
+    # src/test_uhc_hid.c
+    src/test_uhc_hub.c
 )
 
 target_include_directories(app PRIVATE
