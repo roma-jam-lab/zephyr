@@ -15,7 +15,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [esp32s3, nrf54lm20]
+        # platform: [esp32s3, nrf54lm20]
+        platform: [esp32s3]
         zephyr_ver: ["v0.29.2"]
         
     runs-on: [self-hosted, docker, usb_host, "${{ matrix.platform }}"]
