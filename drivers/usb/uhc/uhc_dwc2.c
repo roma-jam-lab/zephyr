@@ -120,13 +120,13 @@ struct uhc_dwc2_channel_data {
 	/* Periodic transfer has been scheduled and waiting for the SOF */
 	bool periodic_scheduled;
 	/* Channel requires split transaction */
-	bool do_split; /* TODO: redundant after split_state was introduced */
+	// bool do_split; /* TODO: redundant after split_state was introduced */
 	/* Channel split state */
-	enum uhc_dwc2_split_state split_state;
+	// enum uhc_dwc2_split_state split_state;
 	/* Channel split complete scheduled */
-	bool split_scheduled; /* Might be redundant, double check */
+	// bool split_scheduled; /* Might be redundant, double check */
 	/* Frame number, when SSPLIT was made. Need to respect the CSPLIT window */
-	uint16_t split_start_frame;
+	// uint16_t split_start_frame;
 };
 
 struct uhc_dwc2_split_info {
@@ -151,6 +151,14 @@ struct uhc_dwc2_channel {
 	atomic_t events;
 	/* Channel transfer helpers */
 	uint32_t length;
+	/* Split transaction enabled flag */
+    	bool do_split;
+	/* Split state */
+    	enum uhc_dwc2_split_state split_state;
+	/* Split is scheduled and will be handled in the next SOF */
+    	bool split_scheduled;
+	/* Split start frame to catch the late CSPLIT */
+    	uint16_t split_start_frame;
 	/* Channel transfer data helpers */
 	struct uhc_dwc2_channel_data *data;
 };
@@ -891,7 +899,7 @@ static void ch_enable(const struct device *dev, struct uhc_dwc2_channel *const c
 	uint16_t curr_frame_num;
 	uint16_t elapsed;
 
-	if (ch->data->split_state != UHC_DWC2_SPLIT_NONE) {
+	if (ch->split_state /* ch->data->split_state */ != UHC_DWC2_SPLIT_NONE) {
 		/*
 		 * If split is required, configure the rest
 		 */
@@ -899,12 +907,12 @@ static void ch_enable(const struct device *dev, struct uhc_dwc2_channel *const c
 		hfnum = sys_read32((mem_addr_t)&base->hfnum);
 		curr_frame_num = usb_dwc2_get_hfnum_frnum(hfnum);
 
-		if (ch->data->split_state == UHC_DWC2_SPLIT_SSPLIT) {
+		if (ch->split_state /* ch->data->split_state */ == UHC_DWC2_SPLIT_SSPLIT) {
 			hcsplt &= ~USB_DWC2_HCSPLT_COMPSPLT;
-			ch->data->split_start_frame = curr_frame_num;
-		} else if (ch->data->split_state == UHC_DWC2_SPLIT_CSPLIT) {
+			ch->split_start_frame = curr_frame_num;
+		} else if (ch->split_state /* ch->data->split_state */ == UHC_DWC2_SPLIT_CSPLIT) {
 			hcsplt |= USB_DWC2_HCSPLT_COMPSPLT;
-			elapsed = (curr_frame_num - ch->data->split_start_frame) &
+			elapsed = (curr_frame_num - ch->split_start_frame) &
 				  PERIODIC_FRAME_MASK;
 
 			/*
@@ -1020,7 +1028,7 @@ static inline void ch_process_control(const struct device *dev,
 				uint16_t total = sys_le16_to_cpu(setup->wLength);
 				remaining = total - xfer->buf->len;
 
-				if (ch->data->do_split) {
+				if (ch->do_split /* ch->data->do_split */) {
 					/* Split for minimum size */
 					size = MIN(remaining, xfer->mps);
 				} else {
@@ -1071,7 +1079,7 @@ static inline void ch_process_control(const struct device *dev,
 
 			short_packet = actual_len < ch->length;
 
-			if (ch->data->do_split &&
+			if (ch->do_split /* ch->data->do_split */ &&
 			    !short_packet &&
 			    xfer->buf->len < total) {
 				uint16_t left = total - xfer->buf->len;
@@ -1105,7 +1113,7 @@ static inline void ch_process_control(const struct device *dev,
 			LOG_DBG("Control DATA OUT completed, prog=%u rem=%u act=%u",
 				ch->length, remaining, actual_len);
 			
-			if (ch->data->do_split) {
+			if (ch->do_split /* ch->data->do_split */) {
 				LOG_ERR("Control DATA OUT split is not supported yet");
 				/* TODO: Add split transacton hanlding */
 			}
@@ -1120,8 +1128,8 @@ start_transfer:
 
 #if (1)
 	/* We always start from SSPLIT when process control transfer */
-	if (ch->data->do_split) {
-		ch->data->split_state = UHC_DWC2_SPLIT_SSPLIT;
+	if (ch->do_split /* ch->data->do_split */) {
+		ch->split_state /* ch->data->split_state */ = UHC_DWC2_SPLIT_SSPLIT;
 	}
 
 	/* Calculate new packet count */
@@ -1231,8 +1239,8 @@ static uint32_t ch_handle_in_ssplit(struct uhc_dwc2_channel *const ch, uint32_t 
 			ch_events = BIT(UHC_DWC2_CHANNEL_DO_WAIT_CSPLIT);
 		} else if (hcint & USB_DWC2_HCINT_NAK) {
 			/* Retry SSPLIT */
-			ch->data->split_state = UHC_DWC2_SPLIT_SSPLIT;
-			ch->data->split_scheduled = true;
+			ch->split_state /* ch->data->split_state */ = UHC_DWC2_SPLIT_SSPLIT;
+			ch->split_scheduled /* ch->data->split_scheduled */ = true;
 		} else if (hcint & USB_DWC2_HCINT_XACTERR) {
 			ch->error_count++;
 			if (ch->error_count >= 3) { 
@@ -1243,8 +1251,8 @@ static uint32_t ch_handle_in_ssplit(struct uhc_dwc2_channel *const ch, uint32_t 
 				ch_events |= BIT(UHC_DWC2_CHANNEL_EVENT_ERROR);
 			} else {
 				/* Retry */
-				ch->data->split_state = UHC_DWC2_SPLIT_SSPLIT;
-				ch->data->split_scheduled = true;
+				ch->split_state /* ch->data->split_state */ = UHC_DWC2_SPLIT_SSPLIT;
+				ch->split_scheduled /* ch->data->split_scheduled */ = true;
 			}
 		} else {
 			LOG_ERR("IN channel%d unexpected SSPLIT halt, HCINT 0x%08x",
@@ -1269,15 +1277,15 @@ static uint32_t ch_handle_in_csplit(struct uhc_dwc2_channel *const ch, uint32_t 
 			ch_events |= BIT(UHC_DWC2_CHANNEL_DO_RELEASE);
 		} else if (hcint & USB_DWC2_HCINT_NAK) {
 			/* Retry SSPLIT */
-			ch->data->split_state = UHC_DWC2_SPLIT_SSPLIT;
-			ch->data->split_scheduled = true;
+			ch->split_state /* ch->data->split_state */ = UHC_DWC2_SPLIT_SSPLIT;
+			ch->split_scheduled /* ch->data->split_scheduled */ = true;
 		} else if (hcint & USB_DWC2_HCINT_NYET) {
 			/* Retry CSLPIT */
-			ch->data->split_state = UHC_DWC2_SPLIT_CSPLIT;
-			ch->data->split_scheduled = true;
+			ch->split_state /* ch->data->split_state */ = UHC_DWC2_SPLIT_CSPLIT;
+			ch->split_scheduled /* ch->data->split_scheduled */ = true;
 		} else if (hcint & USB_DWC2_HCINT_STALL) {
 			/* De-allocate the channel */
-			ch->data->split_state = UHC_DWC2_SPLIT_NONE;
+			ch->split_state /* ch->data->split_state */ = UHC_DWC2_SPLIT_NONE;
 			ch_events |= BIT(UHC_DWC2_CHANNEL_EVENT_STALL);
 			ch_events |= BIT(UHC_DWC2_CHANNEL_DO_RELEASE);
 		} else if (hcint & USB_DWC2_HCINT_XACTERR) {
@@ -1290,8 +1298,8 @@ static uint32_t ch_handle_in_csplit(struct uhc_dwc2_channel *const ch, uint32_t 
 				ch_events |= BIT(UHC_DWC2_CHANNEL_EVENT_ERROR);
 			} else {
 				/* Retry */
-				ch->data->split_state = UHC_DWC2_SPLIT_SSPLIT;
-				ch->data->split_scheduled = true;
+				ch->split_state /* ch->data->split_state */ = UHC_DWC2_SPLIT_SSPLIT;
+				ch->split_scheduled /* ch->data->split_scheduled */ = true;
 			}
 		} else {
 			LOG_ERR("IN channel%d CSPLIT failed, HCINT 0x%08x",
@@ -1311,9 +1319,9 @@ static uint32_t ch_handle_in_bulk_control(const struct device *dev,
 	uint32_t ch_events = 0;
 
 	/* Process Split transfers quickly first */
-	if (ch->data->do_split) {
+	if (ch->do_split /* ch->data->do_split */) {
 		/* TODO: We should never be here with UHC_DWC2_SPLIT_NONE state */
-		if (ch->data->split_state == UHC_DWC2_SPLIT_SSPLIT) {
+		if (ch->split_state /* ch->data->split_state */ == UHC_DWC2_SPLIT_SSPLIT) {
 			return ch_handle_in_ssplit(ch, hcint);
 		} else {
 			/*
@@ -1382,12 +1390,12 @@ static uint32_t ch_handle_out_ssplit(struct uhc_dwc2_channel *ch,
 		if (hcint & USB_DWC2_HCINT_ACK) {
 			/* Reset error count and move to CSPLIT stage */
 			ch->error_count = 0;
-			ch->data->split_state = UHC_DWC2_SPLIT_CSPLIT;
-			ch->data->split_scheduled = true;
+			ch->split_state /* ch->data->split_state */ = UHC_DWC2_SPLIT_CSPLIT;
+			ch->split_scheduled /* ch->data->split_scheduled */ = true;
 		} else if (hcint & USB_DWC2_HCINT_NAK) {
 			/* Downstream endpoint returned NAK, rewind and retry SSPLIT */
-			ch->data->split_state = UHC_DWC2_SPLIT_SSPLIT;
-			ch->data->split_scheduled = true;
+			ch->split_state /* ch->data->split_state */ = UHC_DWC2_SPLIT_SSPLIT;
+			ch->split_scheduled /* ch->data->split_scheduled */ = true;
 			ch_events |= BIT(UHC_DWC2_CHANNEL_DO_REWIND);
 		} else if (hcint & USB_DWC2_HCINT_XACTERR) {
 			ch->error_count++;
@@ -1399,8 +1407,8 @@ static uint32_t ch_handle_out_ssplit(struct uhc_dwc2_channel *ch,
 				ch_events |= BIT(UHC_DWC2_CHANNEL_EVENT_ERROR);
 			} else {
 				/* Rewind and retry CSPLIT */
-				ch->data->split_state = UHC_DWC2_SPLIT_CSPLIT;
-				ch->data->split_scheduled = true;
+				ch->split_state /* ch->data->split_state */ = UHC_DWC2_SPLIT_CSPLIT;
+				ch->split_scheduled /* ch->data->split_scheduled */ = true;
 				ch_events |= BIT(UHC_DWC2_CHANNEL_DO_REWIND);
 			}
 		} else {
@@ -1427,12 +1435,12 @@ static uint32_t ch_handle_out_csplit(struct uhc_dwc2_channel *ch,
 			ch_events |= BIT(UHC_DWC2_CHANNEL_DO_RELEASE);
 		} else if (hcint & USB_DWC2_HCINT_NAK) {
 			/* Downstream endpoint returned NAK, retry SSPLIT */
-			ch->data->split_state = UHC_DWC2_SPLIT_SSPLIT;
-			ch->data->split_scheduled = true;
+			ch->split_state /* ch->data->split_state */ = UHC_DWC2_SPLIT_SSPLIT;
+			ch->split_scheduled /* ch->data->split_scheduled */ = true;
 		} else if (hcint & USB_DWC2_HCINT_NYET) {
 			/* TT has not finished the FS/LS transaction yet, retry CSPLIT */
-			ch->data->split_state = UHC_DWC2_SPLIT_CSPLIT;
-			ch->data->split_scheduled = true;
+			ch->split_state /* ch->data->split_state */ = UHC_DWC2_SPLIT_CSPLIT;
+			ch->split_scheduled /* ch->data->split_scheduled */ = true;
 		} else if (hcint & USB_DWC2_HCINT_STALL) {
 			/* Propagate STALL and release channel */
 			ch_events |= BIT(UHC_DWC2_CHANNEL_EVENT_STALL);
@@ -1455,9 +1463,9 @@ static inline uint32_t ch_handle_out_bulk_control(const struct device *dev,
 	uint32_t ch_events = 0;
 
 	/* Process Split transfers quickly first */
-	if (ch->data->do_split) {
+	if (ch->do_split /* ch->data->do_split */) {
 		/* TODO: We should never be here with UHC_DWC2_SPLIT_NONE state */
-		if (ch->data->split_state == UHC_DWC2_SPLIT_SSPLIT) {
+		if (ch->split_state /* ch->data->split_state */ == UHC_DWC2_SPLIT_SSPLIT) {
 			return ch_handle_out_ssplit(ch, hcint);
 		} else {
 			/*
@@ -1758,18 +1766,24 @@ static int ch_claim(const struct device *const dev,
 
 	/* Save channel characteristics of the underlying channel */
 	ch->xfer = xfer;
+	ch->do_split = false;
+	ch->split_state = UHC_DWC2_SPLIT_NONE;
+	ch->split_scheduled = false;
+	ch->split_start_frame = 0;
+
+	/* Get the related EP data */
 	ch->data = ch_data_get(priv, xfer->udev, xfer->ep);
 
 	if (ch->data == NULL) {
 		LOG_ERR("No channel data slot for addr %u ep 0x%02x", xfer->udev->addr, xfer->ep);
 		return -ENOMEM;
 	}
-
+	
 	ch->data->scheduled_frame = 0;
 	ch->data->periodic_started = false;
 	ch->data->periodic_scheduled = false;
-	ch->data->do_split = false;
-	ch->data->split_state = UHC_DWC2_SPLIT_NONE;
+	// ch->data->do_split = false;
+	// ch->data->split_state = UHC_DWC2_SPLIT_NONE;
 
 	priv->free_chs--;
 
@@ -1833,17 +1847,21 @@ static int ch_configure(const struct device *const dev, struct uhc_dwc2_channel 
 			 usb_dwc2_set_hcsplt_hubaddr(split.hub_addr) |
 			 usb_dwc2_set_hcsplt_prtaddr(split.hub_port) |
 			 usb_dwc2_set_hcsplt_xactpos(USB_DWC2_HCSPLT_XACTPOS_ALL);
-		ch->data->do_split = true;
-		ch->data->split_state = UHC_DWC2_SPLIT_SSPLIT;
+		// ch->data->do_split = true;
+		// ch->data->split_state = UHC_DWC2_SPLIT_SSPLIT;
 		// ch->data->split_start_frame = usb_dwc2_get_hfnum_frnum(hfnum);
+		ch->do_split = true;
+		ch->split_state = UHC_DWC2_SPLIT_SSPLIT;
 		LOG_DBG("Channel%u SSPLIT, for dev=%u, speed=%u via hub=%u, port=%u",
 			ch->index,
 			udev->addr, udev->speed,
 			split.hub_addr, split.hub_port);
 	} else {
 		hcsplt = 0;
-		ch->data->do_split = false;
-		ch->data->split_state = UHC_DWC2_SPLIT_NONE;
+		ch->do_split = false;
+		ch->split_state = UHC_DWC2_SPLIT_NONE;
+		// ch->data->do_split = false;
+		// ch->data->split_state = UHC_DWC2_SPLIT_NONE;
 	}
 
 	sys_write32(hcsplt, (mem_addr_t)&ch->regs->hcsplt);
@@ -2206,9 +2224,9 @@ static void port_sof(const struct device *dev)
 		}
 
 		/* Handle pending CSPLIT first. */
-		if (ch->data->split_scheduled) {
+		if (ch->split_scheduled /* ch->data->split_scheduled */) {
 			// ch_start_split(dev, ch);
-			ch->data->split_scheduled = false;
+			ch->split_scheduled /* ch->data->split_scheduled */ = false;
 			ch_enable(dev, ch);
 			continue;
 		}
@@ -2674,8 +2692,8 @@ static void ch_handle_events(const struct device *dev, struct uhc_dwc2_channel *
 		uhc_xfer_return(dev, xfer, err);
 	} else {
 		if (events & BIT(UHC_DWC2_CHANNEL_DO_WAIT_CSPLIT)) {
-			ch->data->split_state = UHC_DWC2_SPLIT_CSPLIT;
-			ch->data->split_scheduled = true;
+			ch->split_state /* ch->data->split_state */ = UHC_DWC2_SPLIT_CSPLIT;
+			ch->split_scheduled /* ch->data->split_scheduled */ = true;
 
 			LOG_DBG("Channel%d waiting for CSPLIT", ch->index);
 		}
