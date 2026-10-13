@@ -819,6 +819,7 @@ static int port_resume(const struct device *const dev)
 	return ret;
 }
 
+#if (0)
 static void ch_split_start_new(const struct device *dev, struct uhc_dwc2_channel *const ch)
 {
 	struct usb_dwc2_reg *base = uhc_dwc2_get_base(dev);
@@ -873,6 +874,118 @@ static void ch_start_split(const struct device *dev, struct uhc_dwc2_channel *co
 	hcchar &= ~USB_DWC2_HCCHAR_CHDIS;
 	sys_write32(hcchar, (mem_addr_t)&ch->regs->hcchar);
 }
+#endif
+
+/*
+ * Enable the channel for the transfer.
+ * Before calling, we must prepare the channel's HCTSIZ, HCDMA,
+ * direction and SPLIT state.
+ */
+static void ch_enable(const struct device *dev, struct uhc_dwc2_channel *const ch)
+{
+	struct usb_dwc2_reg *const base = uhc_dwc2_get_base(dev);
+	uint32_t hcint;
+	uint32_t hcchar;
+	uint32_t hcsplt;
+	uint32_t hfnum;
+	uint16_t curr_frame_num;
+	uint16_t elapsed;
+
+	if (ch->data->split_state != UHC_DWC2_SPLIT_NONE) {
+		/*
+		 * If split is required, configure the rest
+		 */
+		hcsplt = sys_read32((mem_addr_t)&ch->regs->hcsplt);
+		hfnum = sys_read32((mem_addr_t)&base->hfnum);
+		curr_frame_num = usb_dwc2_get_hfnum_frnum(hfnum);
+
+		if (ch->data->split_state == UHC_DWC2_SPLIT_SSPLIT) {
+			hcsplt &= ~USB_DWC2_HCSPLT_COMPSPLT;
+			ch->data->split_start_frame = curr_frame_num;
+		} else if (ch->data->split_state == UHC_DWC2_SPLIT_CSPLIT) {
+			hcsplt |= USB_DWC2_HCSPLT_COMPSPLT;
+			elapsed = (curr_frame_num - ch->data->split_start_frame) &
+				  PERIODIC_FRAME_MASK;
+
+			/*
+			 * When we spend a lot of time between SSPLIT ACK and
+			 * CSPLIT, the TT's valid response window can expired.
+			 * We need to respect the permitted window, in this
+			 * matters, add the warning to catch the problem appearance.
+			 */
+			if (elapsed > 5U) {
+				LOG_WRN("CSPLIT late, elapsed %u", elapsed);
+			}
+		} else {
+			LOG_ERR("Channel%d invalid split state", ch->index);
+			return;
+		}
+
+		sys_write32(hcsplt, (mem_addr_t)&ch->regs->hcsplt);
+	}
+
+	/* Clear pending channel interrupts */
+	hcint = sys_read32((mem_addr_t)&ch->regs->hcint);
+	sys_write32(hcint, (mem_addr_t)&ch->regs->hcint);
+
+	/* Enable channel */
+	hcchar = sys_read32((mem_addr_t)&ch->regs->hcchar);
+	hcchar |= USB_DWC2_HCCHAR_CHENA;
+	hcchar &= ~USB_DWC2_HCCHAR_CHDIS;
+	sys_write32(hcchar, (mem_addr_t)&ch->regs->hcchar);
+}
+#if (0)
+static void ch_enable(const struct device *dev,  struct uhc_dwc2_channel *const ch)
+{
+	struct usb_dwc2_reg *base = uhc_dwc2_get_base(dev);
+	uint32_t hcint;
+	uint32_t hcchar;
+
+	uint32_t hcsplt;
+	uint32_t hcchar;
+	uint32_t hfnum;
+	uint16_t curr_frame;
+	uint16_t elapsed;
+
+	/* TODO: Do Split */
+	if (ch->data->split_state != UHC_DWC2_SPLIT_NONE) {
+		hcsplt = sys_read32((mem_addr_t)&ch->regs->hcsplt);
+		hfnum = sys_read32((mem_addr_t)&base->hfnum);
+
+		if (ch->data->split_state == UHC_DWC2_SPLIT_SSPLIT) {
+			hcsplt &= ~USB_DWC2_HCSPLT_COMPSPLT;
+			ch->data->split_start_frame = usb_dwc2_get_hfnum_frnum(hfnum);
+		} else if (ch->data->split_state == UHC_DWC2_SPLIT_CSPLIT) {
+			hcsplt |= USB_DWC2_HCSPLT_COMPSPLT;
+			curr_frame = usb_dwc2_get_hfnum_frnum(hfnum);
+			elapsed = (curr_frame - ch->data->split_start_frame) & PERIODIC_FRAME_MASK;
+
+			/*
+			* To verify late CSPLIT assume the 5 frames is already too late.
+			*/
+			if (elapsed > 5U) {
+				LOG_WRN("CSPLIT late, elapsed %u", elapsed);
+			}
+		} else {
+			LOG_ERR("Channel%d split wriong state", ch->index);
+		}
+
+		sys_write32(hcsplt, (mem_addr_t)&ch->regs->hcsplt);
+
+		ch->data->split_scheduled = false;
+	}
+
+	/* Clean interrupts */
+	hcint = sys_read32((mem_addr_t)&ch->regs->hcint);
+	sys_write32(hcint, (mem_addr_t)&ch->regs->hcint);
+
+	/* Enable channel */
+	hcchar = sys_read32((mem_addr_t)&ch->regs->hcchar);
+	hcchar |= USB_DWC2_HCCHAR_CHENA;
+	hcchar &= ~USB_DWC2_HCCHAR_CHDIS;
+	sys_write32(hcchar, (mem_addr_t)&ch->regs->hcchar);
+}
+#endif
 
 static inline void ch_process_control(const struct device *dev,
 				      struct uhc_dwc2_channel *const ch)
@@ -967,13 +1080,15 @@ static inline void ch_process_control(const struct device *dev,
 				ch->length, actual_len, xfer->buf->len, total);
 
 				/*
-				* DATA stage continues. Select next chunk of xfer->mps length
+				* DATA stage continues. Select next chunk with
+				* xfer->mps length and start split transfer.
 				*/
 				next_dir_is_in = true;
 				size = MIN(left, xfer->mps);
 				ch->length = size;
 				dma_addr = (mem_addr_t)net_buf_tail(xfer->buf);
 
+				/* TODO: Refactor needed, we always send 1 packet of xfer->mps! */
 				pkt_cnt  = calc_packet_count(size, xfer->mps);
 				ch->data->next_pid = calc_next_pid(ch->data->next_pid, pkt_cnt);
 				goto start_transfer;
@@ -1003,6 +1118,43 @@ static inline void ch_process_control(const struct device *dev,
 
 start_transfer:
 
+#if (1)
+	/* We always start from SSPLIT when process control transfer */
+	if (ch->data->do_split) {
+		ch->data->split_state = UHC_DWC2_SPLIT_SSPLIT;
+	}
+
+	/* Calculate new packet count */
+	pkt_cnt  = calc_packet_count(size, xfer->mps);
+
+	/* Prepare HCTSIZ */
+	hctsiz = usb_dwc2_set_hctsiz_pid(ch->data->next_pid) |
+		usb_dwc2_set_hctsiz_pktcnt(pkt_cnt) |
+		usb_dwc2_set_hctsiz_xfersize(size);
+
+	/* Prepare DMA address */
+	if (dma_addr != 0 && size > 0) {
+		if (next_dir_is_in) {
+			sys_cache_data_invd_range((void *)dma_addr, size);
+		} else {
+			sys_cache_data_flush_range((void *)dma_addr, size);
+		}
+	}
+	uhc_dwc2_quirk_dma_addr_xlate(dev, &dma_addr);
+	sys_write32(hctsiz, (mem_addr_t)&ch->regs->hctsiz);
+	sys_write32((uint32_t)dma_addr, (mem_addr_t)&ch->regs->hcdma);
+
+	/* Prepare channel direcion */
+	hcchar = sys_read32((mem_addr_t)&ch->regs->hcchar);
+	if (next_dir_is_in) {
+		hcchar |= USB_DWC2_HCCHAR_EPDIR;
+	} else {
+		hcchar &= ~ USB_DWC2_HCCHAR_EPDIR;
+	}
+	sys_write32(hcchar, (mem_addr_t)&ch->regs->hcchar);
+
+	ch_enable(dev, ch);
+#else
 	hcchar = sys_read32((mem_addr_t)&ch->regs->hcchar);
 
 	/* Calculate new packet count */
@@ -1015,7 +1167,18 @@ start_transfer:
 	}
 
 	if (ch->data->do_split) {
-		ch_split_start_new(dev, ch);
+		struct usb_dwc2_reg *base = uhc_dwc2_get_base(dev);
+		uint32_t hcsplt = sys_read32((mem_addr_t)&ch->regs->hcsplt);
+		uint32_t hfnum = sys_read32((mem_addr_t)&base->hfnum);
+
+		/* New bus transaction always begins with SSPLIT. */
+		hcsplt &= ~USB_DWC2_HCSPLT_COMPSPLT;
+		ch->data->split_start_frame = usb_dwc2_get_hfnum_frnum(hfnum);
+
+		sys_write32(hcsplt, (mem_addr_t)&ch->regs->hcsplt);
+
+		ch->data->split_state = UHC_DWC2_SPLIT_SSPLIT;
+		// ch_split_start_new(dev, ch);
 	}
 
 	hcchar |= USB_DWC2_HCCHAR_CHENA;
@@ -1037,6 +1200,7 @@ start_transfer:
 	sys_write32(hctsiz, (mem_addr_t)&ch->regs->hctsiz);
 	sys_write32((uint32_t)dma_addr, (mem_addr_t)&ch->regs->hcdma);
 	sys_write32(hcchar, (mem_addr_t)&ch->regs->hcchar);
+#endif
 }
 
 static bool xfer_is_done(const struct uhc_transfer *xfer)
@@ -1797,117 +1961,6 @@ static bool ch_halt_initiate(struct uhc_dwc2_channel *const ch)
 	return true;
 }
 
-/*
- * Enable the channel for the transfer.
- * Before calling, we must prepare the channel's HCTSIZ, HCDMA,
- * direction and SPLIT state.
- */
-static void ch_enable(const struct device *dev, struct uhc_dwc2_channel *const ch)
-{
-	struct usb_dwc2_reg *const base = uhc_dwc2_get_base(dev);
-	uint32_t hcint;
-	uint32_t hcchar;
-	uint32_t hcsplt;
-	uint32_t hfnum;
-	uint16_t curr_frame_num;
-	uint16_t elapsed;
-
-	if (ch->data->split_state != UHC_DWC2_SPLIT_NONE) {
-		/*
-		 * If split is required, configure the rest
-		 */
-		hcsplt = sys_read32((mem_addr_t)&ch->regs->hcsplt);
-		hfnum = sys_read32((mem_addr_t)&base->hfnum);
-		curr_frame_num = usb_dwc2_get_hfnum_frnum(hfnum);
-
-		if (ch->data->split_state == UHC_DWC2_SPLIT_SSPLIT) {
-			hcsplt &= ~USB_DWC2_HCSPLT_COMPSPLT;
-			ch->data->split_start_frame = curr_frame_num;
-		} else if (ch->data->split_state == UHC_DWC2_SPLIT_CSPLIT) {
-			hcsplt |= USB_DWC2_HCSPLT_COMPSPLT;
-			elapsed = (curr_frame_num - ch->data->split_start_frame) &
-				  PERIODIC_FRAME_MASK;
-
-			/*
-			 * When we spend a lot of time between SSPLIT ACK and
-			 * CSPLIT, the TT's valid response window can expired.
-			 * We need to respect the permitted window, in this
-			 * matters, add the warning to catch the problem appearance.
-			 */
-			if (elapsed > 5U) {
-				LOG_WRN("CSPLIT late, elapsed %u", elapsed);
-			}
-		} else {
-			LOG_ERR("Channel%d invalid split state", ch->index);
-			return;
-		}
-
-		sys_write32(hcsplt, (mem_addr_t)&ch->regs->hcsplt);
-	}
-
-	/* Clear pending channel interrupts */
-	hcint = sys_read32((mem_addr_t)&ch->regs->hcint);
-	sys_write32(hcint, (mem_addr_t)&ch->regs->hcint);
-
-	/* Enable channel */
-	hcchar = sys_read32((mem_addr_t)&ch->regs->hcchar);
-	hcchar |= USB_DWC2_HCCHAR_CHENA;
-	hcchar &= ~USB_DWC2_HCCHAR_CHDIS;
-	sys_write32(hcchar, (mem_addr_t)&ch->regs->hcchar);
-}
-#if (0)
-static void ch_enable(const struct device *dev,  struct uhc_dwc2_channel *const ch)
-{
-	struct usb_dwc2_reg *base = uhc_dwc2_get_base(dev);
-	uint32_t hcint;
-	uint32_t hcchar;
-
-	uint32_t hcsplt;
-	uint32_t hcchar;
-	uint32_t hfnum;
-	uint16_t curr_frame;
-	uint16_t elapsed;
-
-	/* TODO: Do Split */
-	if (ch->data->split_state != UHC_DWC2_SPLIT_NONE) {
-		hcsplt = sys_read32((mem_addr_t)&ch->regs->hcsplt);
-		hfnum = sys_read32((mem_addr_t)&base->hfnum);
-
-		if (ch->data->split_state == UHC_DWC2_SPLIT_SSPLIT) {
-			hcsplt &= ~USB_DWC2_HCSPLT_COMPSPLT;
-			ch->data->split_start_frame = usb_dwc2_get_hfnum_frnum(hfnum);
-		} else if (ch->data->split_state == UHC_DWC2_SPLIT_CSPLIT) {
-			hcsplt |= USB_DWC2_HCSPLT_COMPSPLT;
-			curr_frame = usb_dwc2_get_hfnum_frnum(hfnum);
-			elapsed = (curr_frame - ch->data->split_start_frame) & PERIODIC_FRAME_MASK;
-
-			/*
-			* To verify late CSPLIT assume the 5 frames is already too late.
-			*/
-			if (elapsed > 5U) {
-				LOG_WRN("CSPLIT late, elapsed %u", elapsed);
-			}
-		} else {
-			LOG_ERR("Channel%d split wriong state", ch->index);
-		}
-
-		sys_write32(hcsplt, (mem_addr_t)&ch->regs->hcsplt);
-
-		ch->data->split_scheduled = false;
-	}
-
-	/* Clean interrupts */
-	hcint = sys_read32((mem_addr_t)&ch->regs->hcint);
-	sys_write32(hcint, (mem_addr_t)&ch->regs->hcint);
-
-	/* Enable channel */
-	hcchar = sys_read32((mem_addr_t)&ch->regs->hcchar);
-	hcchar |= USB_DWC2_HCCHAR_CHENA;
-	hcchar &= ~USB_DWC2_HCCHAR_CHDIS;
-	sys_write32(hcchar, (mem_addr_t)&ch->regs->hcchar);
-}
-#endif
-
 static void ch_start_control(const struct device *dev,
 			     struct uhc_dwc2_channel *const ch)
 {
@@ -1938,6 +1991,10 @@ static void ch_start_control(const struct device *dev,
 
 	sys_write32(hctsiz, (mem_addr_t)&ch->regs->hctsiz);
 	sys_write32((uint32_t)dma_addr, (mem_addr_t)&ch->regs->hcdma);
+
+	// if (ch->data->do_split) {
+		// ch->data->split_state = UHC_DWC2_SPLIT_SSPLIT;
+	// }
 
 	ch_enable(dev, ch);
 #if (0)
@@ -2148,9 +2205,11 @@ static void port_sof(const struct device *dev)
 			continue;
 		}
 
-		/* Handle pending Complete-Split first. */
+		/* Handle pending CSPLIT first. */
 		if (ch->data->split_scheduled) {
-			ch_start_split(dev, ch);
+			// ch_start_split(dev, ch);
+			ch->data->split_scheduled = false;
+			ch_enable(dev, ch);
 			continue;
 		}
 
