@@ -1600,16 +1600,16 @@ static int ch_claim(const struct device *const dev,
 	ch->error_count = 0U;
 	ch->hcint_cplt_pending = 0U;
 
-	/* Save channel characteristics of the underlying channel */
-	ch->xfer = xfer;
-
 	/* Flush split */
 	ch->do_split = false;
 	ch->split_state = UHC_DWC2_SPLIT_NONE;
 	ch->split_scheduled = false;
 	ch->split_start_frame = 0U;
 
-	/* Get the related EP data */
+	/* Assign the xfer object */
+	ch->xfer = xfer;
+
+	/* Assign the related EP data */
 	ch->data = ch_data_get(priv, xfer->udev, xfer->ep);
 
 	if (ch->data == NULL) {
@@ -1617,6 +1617,7 @@ static int ch_claim(const struct device *const dev,
 		return -ENOMEM;
 	}
 	
+	/* TODO: It is better to release the channel, when scheduled, flush for now */
 	ch->data->scheduled_frame = 0;
 	ch->data->periodic_started = false;
 	ch->data->periodic_scheduled = false;
