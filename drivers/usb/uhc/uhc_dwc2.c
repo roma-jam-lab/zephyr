@@ -143,6 +143,8 @@ struct uhc_dwc2_channel {
 	atomic_t events;
 	/* Channel transfer helpers */
 	uint32_t length;
+	/* Translated DMA address for rewind purpose */
+	uint32_t dma_addr;
 	/* Split transaction enabled flag */
     	bool do_split;
 	/* Split state */
@@ -819,6 +821,21 @@ static int port_resume(const struct device *const dev)
 	return ret;
 }
 
+static void ch_rewind(const struct device *dev, struct uhc_dwc2_channel *const ch)
+{
+	struct uhc_transfer *const xfer = ch->xfer;
+
+	if (xfer->type != USB_EP_TYPE_CONTROL) {
+		LOG_ERR("Channel%d, rewind for type=%u is not implemented yet",
+			xfer->type,
+			ch->index);
+		return;
+	}
+
+	/* TODO: Do I need to update the HCTSIZ during rewind? */
+	sys_write32(ch->dma_addr, (mem_addr_t)&ch->regs->hcdma);
+}
+
 /*
  * Enable the channel for the transfer.
  * Before calling, we must prepare the channel's HCTSIZ, HCDMA,
@@ -834,7 +851,8 @@ static void ch_enable(const struct device *dev, struct uhc_dwc2_channel *const c
 	uint16_t curr_frame_num;
 	uint16_t elapsed;
 
-	if (ch->split_state != UHC_DWC2_SPLIT_NONE) {
+	// if (ch->split_state != UHC_DWC2_SPLIT_NONE) {
+	if (ch->do_split) {
 		/*
 		 * If split is required, configure the rest
 		 */
@@ -869,6 +887,18 @@ static void ch_enable(const struct device *dev, struct uhc_dwc2_channel *const c
 		}
 
 		sys_write32(hcsplt, (mem_addr_t)&ch->regs->hcsplt);
+
+		/* Update the XCTSIZ */
+		// if (!(sys_read32((mem_addr_t)&ch->regs->hcchar) & USB_DWC2_HCCHAR_EPDIR)) {
+			// LOG_WRN("OUT, update hctsiz to %u", ch->split_state == UHC_DWC2_SPLIT_CSPLIT ? 0 : ch->length);
+			// uint32_t hctsiz = sys_read32((mem_addr_t)&ch->regs->hctsiz);
+
+			// hctsiz &= ~USB_DWC2_HCTSIZ_XFERSIZE_MASK;
+			// hctsiz |= usb_dwc2_set_hctsiz_xfersize(
+			// 	ch->split_state == UHC_DWC2_SPLIT_CSPLIT ? 0 : ch->length);
+
+			// sys_write32(hctsiz, (mem_addr_t)&ch->regs->hctsiz);
+		// }
 	}
 
 	/* Clear pending channel interrupts */
@@ -880,6 +910,13 @@ static void ch_enable(const struct device *dev, struct uhc_dwc2_channel *const c
 	hcchar |= USB_DWC2_HCCHAR_CHENA;
 	hcchar &= ~USB_DWC2_HCCHAR_CHDIS;
 	sys_write32(hcchar, (mem_addr_t)&ch->regs->hcchar);
+
+	// LOG_WRN("SPLIT ch=%u state=%u HCSPLT=%08x HCTSIZ=%08x HCCHAR=%08x",
+	// 	ch->index,
+	// 	ch->split_state,
+	// 	sys_read32((mem_addr_t)&ch->regs->hcsplt),
+	// 	sys_read32((mem_addr_t)&ch->regs->hctsiz),
+	// 	sys_read32((mem_addr_t)&ch->regs->hcchar));
 }
 
 static inline void ch_process_control(const struct device *dev,
@@ -975,9 +1012,9 @@ static inline void ch_process_control(const struct device *dev,
 				ch->length, actual_len, xfer->buf->len, total);
 
 				/*
-				* DATA stage continues. Select next chunk with
-				* xfer->mps length and start split transfer.
-				*/
+				 * DATA stage continues. Select next chunk with
+				 * xfer->mps length and start split transfer.
+				 */
 				next_dir_is_in = true;
 				size = MIN(left, xfer->mps);
 				ch->length = size;
@@ -994,16 +1031,22 @@ static inline void ch_process_control(const struct device *dev,
 				ch->length, actual_len, xfer->buf->len, total);
 
 			/*
-			* Short packet or requested amount received: 
-			* DATA stage is done, move the to STATUS stage.
-			*/
+			 * Short packet or requested amount received,
+			 * DATA stage is done, move the to STATUS stage.
+			 */
 		} else {
-			LOG_DBG("Control DATA OUT completed, prog=%u rem=%u act=%u",
-				ch->length, remaining, actual_len);
-			
 			if (ch->do_split) {
-				LOG_ERR("Control DATA OUT split is not supported yet");
-				/* TODO: Add split transacton hanlding */
+				if (ch->length < sys_le16_to_cpu(setup->wLength)) {
+					LOG_ERR("Control DATA OUT split is not supported yet");
+					/* TODO: Add multipacket OUT SPLIT handling */
+				}
+
+				LOG_DBG("Control DATA OUT completed, prog=%u rem=%u act=%u",
+					 ch->length, remaining, actual_len);
+				/*
+				 * Short OUT packet,
+				 * DATA stage is done, move to STATUS stage.
+				 */
 			}
 		}
 
@@ -1038,6 +1081,8 @@ start_transfer:
 	uhc_dwc2_quirk_dma_addr_xlate(dev, &dma_addr);
 	sys_write32(hctsiz, (mem_addr_t)&ch->regs->hctsiz);
 	sys_write32((uint32_t)dma_addr, (mem_addr_t)&ch->regs->hcdma);
+	/* TODO: check, save the xlate value of raw one? */
+	ch->dma_addr = dma_addr;
 
 	/* Prepare channel direcion */
 	hcchar = sys_read32((mem_addr_t)&ch->regs->hcchar);
@@ -1277,6 +1322,7 @@ static uint32_t ch_handle_out_csplit(struct uhc_dwc2_channel *ch,
 			/* Downstream endpoint returned NAK, retry SSPLIT */
 			ch->split_state = UHC_DWC2_SPLIT_SSPLIT;
 			ch->split_scheduled = true;
+			ch_events |= BIT(UHC_DWC2_CHANNEL_DO_REWIND);
 		} else if (hcint & USB_DWC2_HCINT_NYET) {
 			/* TT has not finished the FS/LS transaction yet, retry CSPLIT */
 			ch->split_state = UHC_DWC2_SPLIT_CSPLIT;
@@ -1847,6 +1893,8 @@ static void ch_start_control(const struct device *dev,
 
 	sys_write32(hctsiz, (mem_addr_t)&ch->regs->hctsiz);
 	sys_write32((uint32_t)dma_addr, (mem_addr_t)&ch->regs->hcdma);
+	/* TODO: check, save the xlate value of raw one? */
+	ch->dma_addr = dma_addr;
 
 	ch_enable(dev, ch);
 }
@@ -1891,6 +1939,8 @@ static void ch_start_bulk(const struct device *dev,
 	uhc_dwc2_quirk_dma_addr_xlate(dev, &dma_addr);
 	sys_write32(hctsiz, (mem_addr_t)&ch->regs->hctsiz);
 	sys_write32((uint32_t)dma_addr, (mem_addr_t)&ch->regs->hcdma);
+	/* TODO: check, save the xlate value of raw one? */
+	ch->dma_addr = dma_addr;
 
 	/* TODO: Do split */
 
@@ -1977,6 +2027,8 @@ static void ch_start_interrupt(const struct device *dev,
 	uhc_dwc2_quirk_dma_addr_xlate(dev, &dma_addr);
 	sys_write32(hctsiz, (mem_addr_t)&ch->regs->hctsiz);
 	sys_write32((uint32_t)dma_addr, (mem_addr_t)&ch->regs->hcdma);
+	/* TODO: check, save the xlate value of raw one? */
+	ch->dma_addr = dma_addr;
 
 	hfnum = sys_read32((mem_addr_t)&base->hfnum);
 	frame = usb_dwc2_get_hfnum_frnum(hfnum);
@@ -2520,8 +2572,7 @@ static void ch_handle_events(const struct device *dev, struct uhc_dwc2_channel *
 		}
 
 		if (events & BIT(UHC_DWC2_CHANNEL_DO_REWIND)) {
-			/* TODO: Implement rewind xfer */
-			LOG_WRN("DO_REWIND not implemented yet");
+			ch_rewind(dev, ch);
 		}
 
 		if (events & BIT(UHC_DWC2_CHANNEL_DO_REINIT)) {
