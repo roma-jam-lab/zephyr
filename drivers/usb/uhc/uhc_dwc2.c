@@ -972,12 +972,20 @@ static inline void ch_process_control(const struct device *dev,
 				/* Prepare the DATA OUT */
 				size = xfer->buf->len;
 
+				if (ch->do_split) {
+					/* TODO: handle the size selection */
+					LOG_WRN("Control DATA OUT split len not handled yet");
+					/* size = MIN(xfer->buf->len, xfer->mps); */
+					/* add offset to track successfully completed DATA OUT bytes */
+				}
+
 				LOG_DBG("Control DATA OUT len=%u, tailroom=%zu",
 					xfer->buf->len, net_buf_tailroom(xfer->buf));
 
 				LOG_HEXDUMP_DBG(xfer->buf->data, xfer->buf->len,
 						"Control DATA OUT:");
 
+				ch->length = size;
 				dma_addr = (mem_addr_t)(xfer->buf->data);
 
 				/* TODO: Optimise: goto start_transfer */
