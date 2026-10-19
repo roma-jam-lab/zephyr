@@ -537,3 +537,113 @@ bool test_uhc_hub_process_change(struct usb_device *udev,
 
 	return false;
 }
+
+static enum usb_device_speed test_uhc_hub_get_port_speed(uint16_t status)
+{
+	if (status & TEST_UHC_HUB_PORT_STATUS_HIGH_SPEED) {
+		return USB_SPEED_SPEED_HS;
+	}
+
+	if (status & TEST_UHC_HUB_PORT_STATUS_LOW_SPEED) {
+		return USB_SPEED_SPEED_LS;
+	}
+
+	return USB_SPEED_SPEED_FS;
+}
+
+#define TEST_UHC_HUB_RESET_POLL_MS       	10U
+#define TEST_UHC_HUB_RESET_TIMEOUT_MS   	500U
+#define TEST_UHC_HUB_RESET_RECOVERY_MS		30U
+
+void test_uhc_hub_prepare_child(struct usb_device *hub_udev,
+				uint8_t port,
+				uint8_t child_addr,
+				struct usb_device *child)
+{
+	struct test_uhc_hub_port_status status;
+	uint8_t ep0_mps;
+	bool reset_done = false;
+
+	zassert_not_null(hub_udev, "HUB device is NULL");
+	zassert_not_null(child, "Child device is NULL");
+	zassert_true(port > 0, "Invalid HUB port");
+	zassert_true(child_addr > 0 && child_addr < 128,
+		     "Invalid child address");
+
+	zassert_equal(hub_udev->speed, USB_SPEED_SPEED_HS,
+		      "Expected high-speed HUB");
+
+	/* Check that a device is connected to this port. */
+	test_uhc_hub_get_port_status(hub_udev, port, &status);
+
+	zassert_true(status.status &
+		     TEST_UHC_HUB_PORT_STATUS_CONNECTION,
+		     "No device connected to HUB port %u", port);
+
+	/* Reset the downstream port. */
+	test_uhc_hub_set_port_feature(hub_udev, port, USB_HCFS_PORT_RESET);
+
+	/* Wait until reset completes and the port becomes enabled. */
+	for (uint32_t elapsed = 0;
+	     elapsed < TEST_UHC_HUB_RESET_TIMEOUT_MS;
+	     elapsed += TEST_UHC_HUB_RESET_POLL_MS) {
+
+		k_msleep(TEST_UHC_HUB_RESET_POLL_MS);
+
+		test_uhc_hub_get_port_status(hub_udev, port, &status);
+
+		zassert_true(status.status &
+			     TEST_UHC_HUB_PORT_STATUS_CONNECTION,
+			     "Device disconnected during port reset");
+
+		if (!(status.status &
+		      TEST_UHC_HUB_PORT_STATUS_RESET) &&
+		    (status.status &
+		      TEST_UHC_HUB_PORT_STATUS_ENABLE)) {
+			reset_done = true;
+			break;
+		}
+	}
+
+	zassert_true(reset_done,
+		     "HUB port %u reset timed out", port);
+
+	/* Clear the reset change indication. */
+	if (status.change & TEST_UHC_HUB_PORT_CHANGE_RESET) {
+		test_uhc_hub_clear_port_feature(
+			hub_udev, port, USB_HCFS_C_PORT_RESET);
+	}
+
+	/* Allow the device to recover after reset. */
+	k_msleep(TEST_UHC_HUB_RESET_RECOVERY_MS);
+
+	/*
+	 * Initialize the child while it is still at USB address zero.
+	 *
+	 * Most importantly, configure its parent hub and port
+	 * before the first control transfer.
+	 */
+	test_uhc_dev_init(child);
+
+	child->hub = hub_udev;
+	child->hub_port = port;
+	child->speed = test_uhc_hub_get_port_speed(status.status);
+	child->level = hub_udev->level + 1U;
+
+	/*
+	 * Existing enumeration helpers.
+	 *
+	 * The DWC2 driver will detect the HS parent hub and
+	 * use SPLIT transactions for FS/LS children.
+	 */
+	test_uhc_dev_get_short_dev_desc(child, &ep0_mps);
+	test_uhc_dev_get_full_dev_desc(child, ep0_mps);
+
+	/* Assign the child its own USB address. */
+	test_uhc_dev_set_address(child, child_addr);
+
+	LOG_INF("HUB port %u, New child (speed: %s, bus address %u)",
+		port,
+		((const char *const[]){"N/A", "Low", "Full", "High", "SS"})[child->speed],
+		child->addr);
+}

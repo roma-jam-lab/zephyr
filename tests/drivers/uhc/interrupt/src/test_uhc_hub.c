@@ -59,7 +59,6 @@ ZTEST(test_uhc_hub, test_probe_interface)
 
 	test_uhc_device_cleanup();
 }
-#endif
 
 ZTEST(test_uhc_hub, test_interrupt_in_connect_disconnect)
 {
@@ -136,7 +135,6 @@ ZTEST(test_uhc_hub, test_interrupt_in_connect_disconnect)
 	test_uhc_device_cleanup();
 }
 
-#if (0)
 ZTEST(test_uhc_hub, test_interrupt_in)
 {
 	struct usb_device udev;
@@ -237,5 +235,59 @@ ZTEST(test_uhc_hub, test_interrupt_enqueue_dequeue)
 	test_uhc_device_cleanup();
 }
 #endif
+
+#define TEST_UHC_HUB_CHILD_PORT  2
+#define TEST_UHC_HUB_CHILD_ADDR  2
+
+ZTEST(test_uhc_hub, test_downstream_child_enumeration)
+{
+	struct usb_device hub_udev;
+	struct usb_device child_udev;
+	struct test_uhc_hub_info hub;
+	struct test_uhc_hub_change change;
+	enum usb_device_speed speed;
+
+	test_uhc_init();
+
+	/* Enumerate the upstream hub. */
+	test_uhc_prepare_addressed_device(
+		&hub_udev, &speed, TEST_UHC_HUB_ADDR);
+
+	hub_udev.speed = speed;
+	hub_udev.level = 1;
+
+	zassert_equal(speed, USB_SPEED_SPEED_HS,
+		      "Expected high-speed hub");
+
+	test_uhc_hub_init(&hub_udev,
+			  TEST_UHC_HUB_IFACE,
+			  &hub);
+
+	test_uhc_hub_power_ports(&hub_udev, &hub);
+
+	/*
+	 * The downstream device is expected to be connected to the Port 2
+	 * before starting this test.
+	 */
+	test_uhc_hub_prepare_child(
+		&hub_udev,
+		TEST_UHC_HUB_CHILD_PORT,
+		TEST_UHC_HUB_CHILD_ADDR,
+		&child_udev);
+
+	zassert_equal(child_udev.addr,
+		      TEST_UHC_HUB_CHILD_ADDR,
+		      "Incorrect downstream device address");
+
+	zassert_equal(child_udev.speed,
+		      USB_SPEED_SPEED_FS,
+		      "Expected full-speed child");
+
+	LOG_INF("Downstream device VID=%04x PID=%04x",
+		sys_le16_to_cpu(child_udev.dev_desc.idVendor),
+		sys_le16_to_cpu(child_udev.dev_desc.idProduct));
+
+	test_uhc_device_cleanup();
+}
 
 ZTEST_SUITE(test_uhc_hub, NULL, NULL, NULL, NULL, NULL);

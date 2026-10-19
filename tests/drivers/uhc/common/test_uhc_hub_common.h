@@ -121,4 +121,14 @@ bool test_uhc_hub_process_change(struct usb_device *udev,
 				 struct test_uhc_hub_info *hub,
 				 struct test_uhc_hub_change *result);
 
+/**
+ * Reset a downstream port and enumerate the attached device.
+ *
+ * The hub must already be addressed and configured, and its ports powered.
+ * The child is enumerated at address zero, then assigned child_addr.
+ */
+void test_uhc_hub_prepare_child(struct usb_device *hub_udev,
+				uint8_t port,
+				uint8_t child_addr,
+				struct usb_device *child);
 #endif /* TEST_UHC_HUB_COMMON_H */
