@@ -857,6 +857,10 @@ static void ch_enable(const struct device *dev, struct uhc_dwc2_channel *const c
 			 * matters, add the warning to catch the problem appearance.
 			 */
 			if (elapsed > 5U) {
+				/* TODO:
+				 * If the CSPLIT window has expired, schedule a
+				 * new SSPLIT instead of starting invalid CSPLIT.
+				 */
 				LOG_WRN("CSPLIT late, elapsed %u", elapsed);
 			}
 		} else {
