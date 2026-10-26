@@ -1,5 +1,5 @@
 tests:
-  drivers.usb.uhc.control:
+  drivers.usb.uhc.control_child:
     tags:
       - drivers
       - usb
