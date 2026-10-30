@@ -1,0 +1,11 @@
+sample:
+  name: USB UHC loopback test hardware device
+  description: Vendor control payload store/readback fixture for UHC driver testing
+
+tests:
+  sample.usb.uhc_loopback_device:
+    build_only: true
+    tags:
+      - usb
+      - uhc
+    filter: dt_nodelabel_enabled("zephyr_udc0")
