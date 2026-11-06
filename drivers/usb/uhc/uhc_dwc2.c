@@ -1479,8 +1479,8 @@ static uint32_t ch_handle_out_ssplit(struct uhc_dwc2_channel *ch,
 				ch_events |= BIT(UHC_DWC2_CHANNEL_DO_RELEASE);
 				ch_events |= BIT(UHC_DWC2_CHANNEL_EVENT_ERROR);
 			} else {
-				/* Rewind and retry CSPLIT */
-				ch->split_state = UHC_DWC2_SPLIT_CSPLIT;
+				/* Rewind and retry SSPLIT */
+				ch->split_state = UHC_DWC2_SPLIT_SSPLIT;
 				ch->split_scheduled = true;
 				ch_events |= BIT(UHC_DWC2_CHANNEL_DO_REWIND);
 			}
