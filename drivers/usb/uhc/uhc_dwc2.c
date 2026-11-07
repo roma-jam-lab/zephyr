@@ -826,24 +826,20 @@ static int port_resume(const struct device *const dev)
 static void ch_rewind(const struct device *dev, struct uhc_dwc2_channel *const ch)
 {
 	ARG_UNUSED(dev);
-	struct uhc_transfer *const xfer = ch->xfer;
 
 	/*
-	 * For each transaction payload chunk, ch->dma_addr must
+	 * For each transaction payload chunk, ch->dma_addr must 
 	 * identify the appropriate DMA buffer position.
 	 * A SSPLIT/CSPLIT retry must not advance ch->offset.
 	 */
-
-	if (xfer->type != USB_EP_TYPE_CONTROL) {
-		LOG_ERR("Channel%d, rewind for type=%u is not implemented yet",
-			xfer->type,
-			ch->index);
-		return;
-	}
-
-	/* TODO: Do I need to update the HCTSIZ during rewind? */
-
 	sys_write32(ch->dma_addr, (mem_addr_t)&ch->regs->hcdma);
+
+	/*
+	 * TODO: Verify whether HCTSIZ must also be restored when
+	 * retrying a split transaction. Observed CSPLIT NAK retries 
+	 * preserve theprogrammed HCTSIZ, but other retry/error paths 
+	 * are yet unverified.
+	 */
 }
 
 /*
@@ -1676,6 +1672,7 @@ static uint32_t ch_handle_irq_events(const struct device *dev,
 	struct uhc_transfer *const xfer = ch->xfer;
 	uint32_t ch_events;
 	uint32_t hcint;
+	uint32_t hcchar;
 
 	hcint = sys_read32((mem_addr_t)&ch->regs->hcint);
 	sys_write32(hcint, (mem_addr_t)&ch->regs->hcint);
@@ -1711,7 +1708,8 @@ static uint32_t ch_handle_irq_events(const struct device *dev,
 
 	if (xfer->type == USB_EP_TYPE_BULK || xfer->type == USB_EP_TYPE_CONTROL) {
 		/* Bulk & Control */
-		if (USB_EP_DIR_IS_IN(xfer->ep)) {
+		hcchar = sys_read32((mem_addr_t)&ch->regs->hcchar);
+		if (hcchar & USB_DWC2_HCCHAR_EPDIR) {
 			ch_events = ch_handle_in_bulk_control(dev, ch, hcint);
 		} else {
 			ch_events = ch_handle_out_bulk_control(dev, ch, hcint);
