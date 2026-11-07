@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 Roman Leonov <jam_roma@yahoo.com>
+# SPDX-License-Identifier: Apache-2.0
+
+tests:
+  drivers.uhc.bulk_loopback:
+    tags:
+      - usb
+      - uhc
+    harness: ztest
+    # Requires a high-speed hub with the full-speed loopback device on port 2.
