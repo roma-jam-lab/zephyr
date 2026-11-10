@@ -65,13 +65,21 @@ static struct {
 	bool zlp_required;
 } bulk_state;
 
-/* This interface deliberately declares no non-control endpoints. */
+/* INTR small helper */
+static struct {
+	bool enabled;
+	bool armed;
+	size_t req_len;
+	size_t resp_len;
+} intr_state;
+
+/* Vendor-specific interface with BULK and INTERRUPT endpoints. */
 static struct usb_if_descriptor loopback_if = {
 	.bLength = sizeof(struct usb_if_descriptor),
 	.bDescriptorType = USB_DESC_INTERFACE,
 	.bInterfaceNumber = LOOPBACK_INTERFACE_NUMBER,
 	.bAlternateSetting = 0,
-	.bNumEndpoints = 2,
+	.bNumEndpoints = 4,
 	.bInterfaceClass = 0xff,
 	.bInterfaceSubClass = 0,
 	.bInterfaceProtocol = 0,
@@ -96,10 +104,30 @@ static struct usb_ep_descriptor ep_desc_bulk_in = {
 	.bInterval = 0,
 };
 
+static struct usb_ep_descriptor ep_desc_intr_out = {
+	.bLength = sizeof(struct usb_ep_descriptor),
+	.bDescriptorType = USB_DESC_ENDPOINT,
+	.bEndpointAddress = LOOPBACK_INTR_OUT_EP,
+	.bmAttributes = USB_EP_TYPE_INTERRUPT,
+	.wMaxPacketSize = sys_cpu_to_le16(LOOPBACK_FS_INTR_MPS),
+	.bInterval = 1,
+};
+
+static struct usb_ep_descriptor ep_desc_intr_in = {
+	.bLength = sizeof(struct usb_ep_descriptor),
+	.bDescriptorType = USB_DESC_ENDPOINT,
+	.bEndpointAddress = LOOPBACK_INTR_IN_EP,
+	.bmAttributes = USB_EP_TYPE_INTERRUPT,
+	.wMaxPacketSize = sys_cpu_to_le16(LOOPBACK_FS_INTR_MPS),
+	.bInterval = 1,
+};
+
 static const struct usb_desc_header *const loopback_desc[] = {
 	(const struct usb_desc_header *)&loopback_if,
 	(const struct usb_desc_header *)&ep_desc_bulk_out,
 	(const struct usb_desc_header *)&ep_desc_bulk_in,
+	(const struct usb_desc_header *)&ep_desc_intr_out,
+	(const struct usb_desc_header *)&ep_desc_intr_in,
 	NULL,
 };
 
@@ -109,6 +137,22 @@ static const void *loopback_get_desc(struct usbd_class_data *const c_data,
 	ARG_UNUSED(c_data);
 	ARG_UNUSED(speed);
 	return loopback_desc;
+}
+
+static void loopback_bulk_reset(void)
+{
+	bulk_state.armed = false;
+	bulk_state.zlp_required = false;
+	bulk_state.req_len = 0;
+	bulk_state.resp_len = 0;
+	bulk_state.host_in_len = 0;
+}
+
+static void loopback_intr_reset(void)
+{
+	intr_state.armed = false;
+	intr_state.req_len = 0;
+	intr_state.resp_len = 0;
 }
 
 static bool loopback_valid_setup(const struct usb_setup_packet *setup,
@@ -165,10 +209,55 @@ static int loopback_bulk_prepare_echo(struct usbd_class_data *const c_data,
 
 	ret = usbd_ep_enqueue(c_data, buf);
 	if (ret != 0) {
-		bulk_state.armed = false;
-		bulk_state.req_len = 0;
-		bulk_state.resp_len = 0;
-		bulk_state.host_in_len = 0;
+		loopback_bulk_reset();
+		net_buf_unref(buf);
+	}
+
+	return ret;
+}
+
+static int loopback_intr_prepare_echo(struct usbd_class_data *const c_data,
+				      size_t req_len,
+				      size_t resp_len,
+				      size_t host_in_len)
+{
+	struct net_buf *buf;
+	int ret;
+
+	if (!intr_state.enabled) {
+		return -EACCES;
+	}
+
+	if (req_len == 0 ||
+	    req_len > LOOPBACK_FS_INTR_MPS ||
+	    resp_len == 0 ||
+	    resp_len > req_len ||
+	    resp_len > host_in_len ||
+	    host_in_len > LOOPBACK_FS_INTR_MPS) {
+		return -EINVAL;
+	}
+
+	if (intr_state.armed) {
+		return -EBUSY;
+	}
+
+	buf = usbd_ep_buf_alloc(c_data, LOOPBACK_INTR_OUT_EP, req_len);
+	if (buf == NULL) {
+		return -ENOMEM;
+	}
+
+	intr_state.req_len = req_len;
+	intr_state.resp_len = resp_len;
+	intr_state.armed = true;
+
+	LOG_INF("INTR req_len=%u, resp_len=%u, host_in_len=%u",
+		(unsigned int)req_len,
+		(unsigned int)resp_len,
+		(unsigned int)host_in_len);
+
+	ret = usbd_ep_enqueue(c_data, buf);
+	if (ret != 0) {
+		loopback_intr_reset();
 		net_buf_unref(buf);
 	}
 
@@ -214,7 +303,8 @@ static int loopback_control_to_dev(struct usbd_class_data *const c_data,
 
 		return 0;
 
-	case LOOPBACK_BULK_REQ_ECHO: {
+	case LOOPBACK_BULK_REQ_ECHO:
+	case LOOPBACK_INTR_REQ_ECHO: {
 		uint16_t echo_req_len;
 		uint16_t echo_resp_len;
 		uint16_t echo_host_in_len;
@@ -238,13 +328,21 @@ static int loopback_control_to_dev(struct usbd_class_data *const c_data,
 		echo_resp_len = sys_get_le16(&buf->data[2]);
 		echo_host_in_len = sys_get_le16(&buf->data[4]);
 
-		LOG_INF("ECHO BULK prepare, req_len=%u, resp_len=%u, host_in_len=%u",
+		LOG_INF("ECHO %s prepare, req_len=%u, resp_len=%u, host_in_len=%u",
+			setup->bRequest == LOOPBACK_BULK_REQ_ECHO ? "BULK" : "INTR",
 			echo_req_len, echo_resp_len, echo_host_in_len);
 
+		if (setup->bRequest == LOOPBACK_INTR_REQ_ECHO) {
+			return loopback_intr_prepare_echo(c_data,
+							  echo_req_len,
+							  echo_resp_len,
+							  echo_host_in_len);
+		}
+
 		return loopback_bulk_prepare_echo(c_data,
-						echo_req_len,
-						echo_resp_len,
-						echo_host_in_len);
+						  echo_req_len,
+						  echo_resp_len,
+						  echo_host_in_len);
 	}
 
 	default:
@@ -290,6 +388,7 @@ static void loopback_enable(struct usbd_class_data *const c_data)
 	ARG_UNUSED(c_data);
 
 	bulk_state.enabled = true;
+	intr_state.enabled = true;
 	LOG_INF("USB loopback configured");
 }
 
@@ -298,9 +397,10 @@ static void loopback_disable(struct usbd_class_data *const c_data)
 	ARG_UNUSED(c_data);
 
 	bulk_state.enabled = false;
-	bulk_state.armed = false;
-	bulk_state.req_len = 0;
-	bulk_state.resp_len = 0;
+	loopback_bulk_reset();
+
+	intr_state.enabled = false;
+	loopback_intr_reset();
 
 	LOG_INF("USB loopback disabled");
 }
@@ -320,12 +420,7 @@ static int loopback_request(struct usbd_class_data *const c_data,
 			LOG_ERR("BULK OUT failed: err=%d len=%u req_len=%zu",
 				err, buf->len, bulk_state.req_len);
 
-			bulk_state.armed = false;
-			bulk_state.zlp_required = false;
-			bulk_state.req_len = 0;
-			bulk_state.resp_len = 0;
-			bulk_state.host_in_len = 0;
-
+			loopback_bulk_reset();
 			return usbd_ep_buf_free(ctx, buf);
 		}
 
@@ -334,12 +429,8 @@ static int loopback_request(struct usbd_class_data *const c_data,
 		if (reply == NULL) {
 			LOG_ERR("BULK IN buffer allocation failed");
 
-			bulk_state.armed = false;
-			bulk_state.zlp_required = false;
-			bulk_state.req_len = 0;
-			bulk_state.resp_len = 0;
-			bulk_state.host_in_len = 0;
 
+			loopback_bulk_reset();
 			return usbd_ep_buf_free(ctx, buf);
 		}
 
@@ -355,11 +446,7 @@ static int loopback_request(struct usbd_class_data *const c_data,
 			LOG_ERR("BULK IN enqueue failed: %d", ret);
 			net_buf_unref(reply);
 
-			bulk_state.armed = false;
-			bulk_state.zlp_required = false;
-			bulk_state.req_len = 0;
-			bulk_state.resp_len = 0;
-			bulk_state.host_in_len = 0;
+			loopback_bulk_reset();
 		}
 
 		/* Keep armed until BULK IN (and optional ZLP) completes. */
@@ -372,13 +459,15 @@ static int loopback_request(struct usbd_class_data *const c_data,
 		ret = usbd_ep_buf_free(ctx, buf);
 		if (ret != 0) {
 			LOG_ERR("BULK IN buffer free failed: %d", ret);
-			goto bulk_in_done;
+			loopback_bulk_reset();
+			return ret;
 		}
 
 		if (err != 0) {
 			LOG_ERR("BULK IN failed: %d", err);
 			ret = err;
-			goto bulk_in_done;
+			loopback_bulk_reset();
+			return ret;
 		}
 
 		if (send_zlp) {
@@ -389,7 +478,8 @@ static int loopback_request(struct usbd_class_data *const c_data,
 			if (reply == NULL) {
 				LOG_ERR("BULK IN ZLP allocation failed");
 				ret = -ENOMEM;
-				goto bulk_in_done;
+				loopback_bulk_reset();
+				return ret;
 			}
 
 			LOG_INF("BULK IN sending ZLP");
@@ -398,7 +488,8 @@ static int loopback_request(struct usbd_class_data *const c_data,
 			if (ret != 0) {
 				LOG_ERR("BULK IN ZLP enqueue failed: %d", ret);
 				net_buf_unref(reply);
-				goto bulk_in_done;
+				loopback_bulk_reset();
+				return ret;
 			}
 
 			/*
@@ -408,14 +499,62 @@ static int loopback_request(struct usbd_class_data *const c_data,
 			return 0;
 		}
 
-bulk_in_done:
-		bulk_state.armed = false;
-		bulk_state.zlp_required = false;
-		bulk_state.req_len = 0;
-		bulk_state.resp_len = 0;
-		bulk_state.host_in_len = 0;
-
+		/* BULK IN completed successfully */
+		loopback_bulk_reset();
 		return ret;
+	}
+
+	if (ep == LOOPBACK_INTR_OUT_EP) {
+		if (err != 0 ||
+		    !intr_state.armed ||
+		    buf->len != intr_state.req_len) {
+			LOG_ERR("INTR OUT failed: err=%d len=%u req_len=%zu",
+				err, buf->len, intr_state.req_len);
+
+			loopback_intr_reset();
+			return usbd_ep_buf_free(ctx, buf);
+		}
+
+		reply = usbd_ep_buf_alloc(c_data, LOOPBACK_INTR_IN_EP,
+					 intr_state.resp_len);
+		if (reply == NULL) {
+			LOG_ERR("INTR IN buffer allocation failed");
+
+			loopback_intr_reset();
+			return usbd_ep_buf_free(ctx, buf);
+		}
+
+		net_buf_add_mem(reply, buf->data, intr_state.resp_len);
+
+		ret = usbd_ep_buf_free(ctx, buf);
+		if (ret != 0) {
+			LOG_ERR("INTR OUT buffer free failed: %d", ret);
+			net_buf_unref(reply);
+			loopback_intr_reset();
+			return ret;
+		}
+
+		ret = usbd_ep_enqueue(c_data, reply);
+		if (ret != 0) {
+			LOG_ERR("INTR IN enqueue failed: %d", ret);
+			net_buf_unref(reply);
+			loopback_intr_reset();
+		}
+
+		/* Keep armed until IN completes. */
+		return ret;
+	}
+
+	if (ep == LOOPBACK_INTR_IN_EP) {
+		ret = usbd_ep_buf_free(ctx, buf);
+
+		if (err != 0) {
+			LOG_ERR("INTR IN failed: %d", err);
+		}
+
+		loopback_intr_reset();
+
+		return ret != 0 ? ret : err;
 	}
 
 	return usbd_ep_buf_free(ctx, buf);
@@ -434,7 +573,8 @@ static const struct usbd_class_api loopback_api = {
 static const struct usbd_cctx_vendor_req loopback_vreqs =
 	USBD_VENDOR_REQ(LOOPBACK_REQ_SET_PAYLOAD,
 			LOOPBACK_REQ_GET_PAYLOAD,
-			LOOPBACK_BULK_REQ_ECHO);
+			LOOPBACK_BULK_REQ_ECHO,
+			LOOPBACK_INTR_REQ_ECHO);
 
 USBD_DEFINE_CLASS(usb_loopback, &loopback_api, NULL, &loopback_vreqs);
 
