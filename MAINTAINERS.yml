@@ -400,6 +400,7 @@ Alif Semiconductor Platforms:
   files:
     - boards/alif/
     - drivers/*/*alif*
+    - drivers/*/*/*alif*
     - dts/arm/alif/
     - dts/bindings/*/alif,*
     - include/zephyr/dt-bindings/*/alif*.h
@@ -5108,6 +5109,7 @@ Networking:
   files:
     - doc/services/connectivity/networking/api/ieee802154.rst
     - include/zephyr/net/ieee802154*.h
+    - samples/net/ieee802154/
     - subsys/net/l2/ieee802154/
     - subsys/net/lib/config/ieee802154*
     - tests/net/ieee802154/
@@ -7642,6 +7644,7 @@ West:
   collaborators:
     - pdgendt
     - uLipe
+    - AndreCostaaa
   files:
     - modules/lvgl/
     - tests/lib/gui/lvgl/

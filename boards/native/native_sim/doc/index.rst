@@ -457,12 +457,9 @@ Here are more details on the peripherals that are currently provided with this b
   Both can also be overridden from the command line with the ``--wifi-if=<name>``
   and ``--wifi-mac-addr=<mac>`` options.
 
-  64-bit ``native_sim`` (``native_sim/native/64``) is not supported yet, as the
-  hostap sources the driver pulls in do not build cleanly for 64-bit, so the
-  driver can only be built for a 32-bit ``native_sim`` image on a Linux host.
   The build links the host ``libnl``, which has to match the word size of the
-  image, so it requires the 32-bit ``libnl`` development libraries; on a
-  Debian/Ubuntu host:
+  image. The default 32-bit ``native_sim`` target requires the 32-bit ``libnl``
+  development libraries; on a Debian/Ubuntu host:
 
   .. code-block:: console
 
@@ -470,6 +467,13 @@ Here are more details on the peripherals that are currently provided with this b
      $ sudo apt update
      $ sudo apt install gcc-multilib pkg-config libnl-3-dev:i386 libnl-genl-3-dev:i386
      $ export PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig
+
+  For :ref:`64bit native_sim<native_sim32_64>` builds the 64-bit version is
+  needed instead:
+
+  .. code-block:: console
+
+     $ sudo apt install pkg-config libnl-3-dev libnl-genl-3-dev
 
   The simulated radio and the access points it connects to are created on the
   host with the ``net-setup.sh`` script and the ``zwifi`` configuration from the
@@ -701,6 +705,38 @@ Here are more details on the peripherals that are currently provided with this b
   to use the specified interface.
 
   SocketCAN support can be enabled by using the :ref:`snippet-socketcan-native-sim`.
+
+**I2C controller**
+  Drives real devices on a host I2C adapter through its Linux i2c-dev node, see
+  :dtcompatible:`zephyr,native-linux-i2c`. The adapter must support plain I2C transfers, not only
+  SMBus ones.
+
+  The bus speed is set on the Linux side, by the adapter's own driver. This Zephyr driver does
+  not apply the given configuration to the adapter: it only stores it, and returns it when
+  :c:func:`i2c_get_config` is called.
+
+  Note the board ``i2c_host`` node is disabled by default, as the adapter number depends on the
+  host, so to use it, you will need an overlay. For example, for ``/dev/i2c-1`` with a sensor at
+  ``0x76``:
+
+  .. code-block:: dts
+
+      &i2c_host {
+        path = "/dev/i2c-1";
+        status = "okay";
+
+        sensor@76 {
+          compatible = "bosch,bme280";
+          reg = <0x76>;
+        };
+      };
+
+  ``--<device>_path=<path>`` overrides the path at run time, where ``<device>`` is the DT node
+  name (``i2c`` for the board node). The ``i2c-dev`` Linux kernel module must be loaded and the
+  node accessible to the user.
+
+  Transfers run on a host thread while simulated time goes on. Their end is seen up to one real
+  time period late, so use a short period (``--rt-period=1e-3``).
 
 **Fuel gauge**
 

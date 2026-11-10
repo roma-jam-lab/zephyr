@@ -186,6 +186,7 @@ config XTENSA
 	select ARCH_HAS_TIMING_FUNCTIONS
 	select ARCH_MEM_DOMAIN_DATA if USERSPACE
 	select THREAD_STACK_INFO
+	select ARCH_HAS_EXTRA_EXCEPTION_INFO
 	select ARCH_HAS_THREAD_PRIV_STACK_SPACE_GET if USERSPACE
 	select ARCH_SUPPORTS_COREDUMP_STACK_PTR if !SMP
 	select ARCH_HAS_USERSPACE if XTENSA_MMU || XTENSA_MPU
@@ -1101,6 +1102,16 @@ config ARCH_HAS_PMU
 	  counters usable by the Zephyr PMU API (<zephyr/arch/pmu.h>). For AArch64,
 	  Cortex-A profiles select this option; enable CONFIG_ARM64_PMUV3 to build
 	  the ARMv8-A PMUv3 driver backend.
+
+config PMU_MAX_COUNTERS
+	int "Maximum number of PMU event counters"
+	depends on ARCH_HAS_PMU
+	default 8
+	range 1 32
+	help
+	  Upper bound on the number of logical event counters the PMU API
+	  can describe, used to size per-counter configuration arrays. A
+	  backend may implement fewer hardware counters.
 
 #
 # Hidden CPU family configs

@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -115,9 +116,23 @@ static void release_http_stream_context(struct http_client_ctx *client,
 static int add_header_field(struct http_client_ctx *client, uint8_t **buf,
 			    size_t *buflen, const char *name, const char *value)
 {
+	/* HTTP/2 field names are lowercase (RFC 9113, Section 8.2.1). Sized like
+	 * the HEADERS frame, the longest name that could be encoded into it.
+	 */
+	char lower_name[CONFIG_HTTP_SERVER_HTTP2_MAX_HEADER_FRAME_LEN];
+	size_t name_len = strlen(name);
 	int ret;
 
-	ret = http_hpack_encode_field(*buf, *buflen, &client->header_field, name, value);
+	if (name_len >= sizeof(lower_name)) {
+		LOG_DBG("Header name too long (%zu)", name_len);
+		return -ENOBUFS;
+	}
+
+	for (size_t i = 0; i <= name_len; i++) {
+		lower_name[i] = tolower((unsigned char)name[i]);
+	}
+
+	ret = http_hpack_encode_field(*buf, *buflen, &client->header_field, lower_name, value);
 	if (ret < 0) {
 		LOG_DBG("Failed to encode header, err %d", ret);
 		return ret;
@@ -165,6 +180,11 @@ static int send_headers_frame(struct http_client_ctx *client, enum http_status s
 
 	for (size_t i = 0; i < extra_headers_count; i++) {
 		const struct http_header *hdr = &extra_headers[i];
+
+		if (http_server_is_connection_specific_header(hdr->name)) {
+			LOG_DBG("Connection-specific header '%s' dropped", hdr->name);
+			continue;
+		}
 
 		if (strcasecmp(hdr->name, "content-encoding") == 0) {
 			content_encoding_sent = true;
@@ -544,6 +564,13 @@ static int handle_http2_static_fs_resource(struct http_resource_detail_static_fs
 		len = fs_read(&file, tmp, sizeof(tmp));
 		if (len < 0) {
 			LOG_ERR("Filesystem read error (%d)", len);
+			ret = len;
+			goto out;
+		}
+
+		if (len == 0) {
+			LOG_ERR("File shorter than announced size (%d bytes left)", remaining);
+			ret = -EIO;
 			goto out;
 		}
 

@@ -404,7 +404,7 @@ static int close_socket(struct net_context *ctx)
 	dev = net_if_get_device(iface);
 	api = dev->api;
 
-	if (!api || !api->close) {
+	if (api->close == NULL) {
 		return -ENOTSUP;
 	}
 
@@ -458,6 +458,20 @@ static int can_sock_close_vmeth(void *obj)
 	}
 
 	return ret;
+}
+
+static int can_sock_poll_prepare_vmeth(void *obj, struct zvfs_pollfd *pfd,
+			struct k_poll_event **pev, struct k_poll_event *pev_end)
+{
+	return zvfs_fdtable_call_poll_prepare(&sock_fd_op_vtable.fd_vtable,
+				obj, pfd, pev, pev_end);
+}
+
+static int can_sock_poll_update_vmeth(void *obj, struct zvfs_pollfd *pfd,
+			struct k_poll_event **pev)
+{
+	return zvfs_fdtable_call_poll_update(&sock_fd_op_vtable.fd_vtable,
+				obj, pfd, pev);
 }
 
 static int can_sock_ioctl_vmeth(void *obj, unsigned int request, va_list args)
@@ -536,7 +550,7 @@ static int can_sock_getsockopt_vmeth(void *obj, int level, int optname,
 
 		api = dev->api;
 
-		if (!api || !api->getsockopt) {
+		if (api->getsockopt == NULL) {
 			errno = ENOTSUP;
 			return -1;
 		}
@@ -664,7 +678,7 @@ static int can_sock_setsockopt_vmeth(void *obj, int level, int optname,
 
 	api = dev->api;
 
-	if (!api || !api->setsockopt) {
+	if (api->setsockopt == NULL) {
 		errno = ENOTSUP;
 		return -1;
 	}
@@ -728,6 +742,8 @@ static const struct socket_op_vtable can_sock_fd_op_vtable = {
 		.write = can_sock_write_vmeth,
 		.close = can_sock_close_vmeth,
 		.ioctl = can_sock_ioctl_vmeth,
+		.poll_prepare = can_sock_poll_prepare_vmeth,
+		.poll_update = can_sock_poll_update_vmeth,
 	},
 	.bind = can_sock_bind_vmeth,
 	.connect = can_sock_connect_vmeth,

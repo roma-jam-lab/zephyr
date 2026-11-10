@@ -61,6 +61,10 @@ Boards
   (P2.0 to P2.2) was removed. SCB2 is now ``arduino_spi`` on the Arduino header pins D11 to D13
   (P10.0 to P10.2), disabled by default.
 
+* LiteX: The deprecated ``CONFIG_LITEX_CSR_DATA_WIDTH`` Kconfig option has been removed. Only the
+  32 bit CSR data width is supported. Designs that use an 8 bit CSR data width must be rebuilt with
+  a 32 bit CSR data width. (:github:`124793`)
+
 Device Drivers and Devicetree
 *****************************
 
@@ -114,6 +118,35 @@ Audio Codec
   When using a :dtcompatible:`fixed-clock` node,
   :kconfig:option:`CONFIG_CLOCK_CONTROL_FIXED_RATE_CLOCK` must be enabled.
 
+Comparator
+==========
+
+* The deprecated ``mcux_lpcmp`` sensor driver, its public header
+  ``zephyr/drivers/sensor/mcux_lpcmp.h``, the ``CONFIG_MCUX_LPCMP_TRIGGER`` option and its sample
+  have been removed. Applications using ``CONFIG_MCUX_LPCMP`` must enable
+  :kconfig:option:`CONFIG_COMPARATOR` and
+  :kconfig:option:`CONFIG_COMPARATOR_NXP_LPCMP` and migrate to the :ref:`comparator_api` instead of
+  the sensor API.
+
+  The :dtcompatible:`nxp,lpcmp` devicetree compatible is unchanged, but existing overlays must be
+  updated for the comparator driver. Legacy sensor properties remain in the binding but are not
+  consumed by the comparator driver:
+
+  * Replace ``hysteresis-level`` with ``hysteresis-mode``, converting integer values ``0`` through
+    ``3`` to strings ``"LEVEL0"`` through ``"LEVEL3"``.
+  * ``power-level = "low"`` becomes ``power-mode = "low_speed"`` and
+    ``power-level = "high"`` becomes ``power-mode = "high_speed"``. The old ``"nano"`` value has
+    no corresponding ``power-mode`` setting.
+  * Replace ``enable-output-pin`` with ``enable-pin-out``. Use ``invert-output`` for output
+    inversion.
+  * The ``function-clock`` property is not used by the comparator driver. Review the SoC clock
+    configuration and the standard ``clocks`` property separately; ``clocks`` is not a direct
+    replacement for the LPCMP internal functional clock-source selection.
+
+  Refer to :zephyr_file:`dts/bindings/comparator/nxp,lpcmp.yaml` for the property definitions. The
+  :zephyr_file:`tests/drivers/comparator/gpio_loopback` test provides an example of the comparator
+  API. (:github:`124232`).
+
 Ethernet
 ========
 
@@ -131,6 +164,10 @@ Ethernet
   Replace ``reset-assert-duration-us`` with ``reset-assert-us``, and replace
   ``reset-deassertion-timeout-ms`` with ``reset-deassert-us``, multiplying its value by 1000 as
   it is now in microseconds. (:github:`124061`)
+
+* The ``ETHERNET_LLDP`` value of :c:enum:`ethernet_hw_caps` has been removed. LLDP is now enabled
+  on every Ethernet interface when :kconfig:option:`CONFIG_NET_LLDP` is set. Out-of-tree Ethernet
+  drivers must stop reporting it. (:github:`124787`)
 
 OPAMP
 =====
@@ -202,6 +239,14 @@ Bluetooth Classic
   :c:func:`bt_l2cap_br_echo_rsp`. The stack answers a received ECHO request with an ECHO response
   without data, unless a registered ``req`` callback handles it.
 
+Bluetooth HCI
+=============
+
+* The STM32WB HCI driver now constructs its generated public Bluetooth address using the low
+  16 bits of the device UDN, the device ID, and the full 24-bit ST company ID. This corrects the
+  previous address layout and changes the generated address on affected devices. Previously bonded
+  peers may need to remove the old bond and pair with the device again.
+
 Bluetooth Host
 ==============
 
@@ -220,6 +265,20 @@ Bluetooth Host
 
 Networking
 **********
+
+* The ``ZFD_IOCTL_POLL_PREPARE``, ``ZFD_IOCTL_POLL_UPDATE``, and
+  ``ZFD_IOCTL_POLL_OFFLOAD`` requests have been deprecated. Implement ``poll_prepare``,
+  ``poll_update``, and ``poll_offload`` in :c:struct:`fd_op_vtable` instead. Out-of-tree ioctl
+  handlers that forward these requests to an in-tree socket should use
+  ``zvfs_fdtable_call_poll_prepare()``, ``zvfs_fdtable_call_poll_update()``, and
+  ``zvfs_fdtable_call_poll_offload()``, as in-tree sockets no longer handle the ``ZFD_IOCTL_POLL_*``
+  requests in their ioctl handlers.
+
+* For ``AF_UNSPEC`` lookups, :c:func:`zsock_getaddrinfo` now returns IPv6 addresses before IPv4
+  ones, unless only the IPv4 addresses are reachable, and queries AAAA records before A records.
+  Applications that use the first result now connect over IPv6 where they used IPv4. Enable
+  :kconfig:option:`CONFIG_NET_SOCKETS_DNS_PREFER_IPV4` to keep IPv4 first, for example with
+  offloaded network interfaces, where reachability cannot be determined.
 
 Other subsystems
 ****************
