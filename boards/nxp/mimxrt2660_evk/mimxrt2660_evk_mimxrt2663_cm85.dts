@@ -19,6 +19,10 @@
 	compatible = "nxp,mimxrt2663";
 	model = "NXP MIMXRT2660-EVK board";
 
+	aliases {
+		rtc = &rtc0;
+	};
+
 	chosen {
 		/*
 		 * XIP from the XSPI0 NOR, data in the XSPI1 PSRAM, both initialized
@@ -39,6 +43,17 @@
 		zephyr,dtcm = &dtcm;
 		zephyr,console = &lpuart0;
 		zephyr,shell-uart = &lpuart0;
+	};
+
+	/* This node describes the GPIO pins of the 8080 interface. */
+	nxp_lcd_8080_connector: lcd-8080-connector {
+		compatible = "nxp,lcd-8080";
+		#gpio-cells = <2>;
+		gpio-map-mask = <0xffffffff 0xffffffc0>;
+		gpio-map-pass-thru = <0 0x3f>;
+		gpio-map = <9 0 &gpio1 22 0>,	/* Pin 9, LCD touch INT */
+			   <10 0 &gpio1 21 0>,	/* Pin 10, LCD backlight control */
+			   <11 0 &gpio1 23 0>;	/* Pin 11, LCD and touch reset */
 	};
 };
 
@@ -61,7 +76,19 @@
 	status = "okay";
 };
 
+&lpi2c0 {
+	status = "okay";
+};
+
+&media_ccm {
+	status = "okay";
+};
+
 &gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
 	status = "okay";
 };
 
@@ -70,6 +97,10 @@
 };
 
 &gpio5 {
+	status = "okay";
+};
+
+&rtc0 {
 	status = "okay";
 };
 
@@ -140,3 +171,7 @@ zephyr_mipi_dsi: &mipi_dsi {};
 	pinctrl-names = "default";
 	status = "okay";
 };
+
+zephyr_mipi_dbi_parallel: &dcif {};
+
+nxp_8080_touch_panel_i2c: &lpi2c1 {};

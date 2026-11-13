@@ -116,6 +116,10 @@ Libraries / Subsystems
       :c:enumerator:`ETHERNET_HW_STP_PORT_STATE` capability and takes the port state and FDB
       flushes from the protocol.
 
+  * TCP can scale its window (RFC 7323) when :kconfig:option:`CONFIG_NET_TCP_WINDOW_SCALE` is
+    enabled, so a connection can use send and receive windows above 64 KB. The window size
+    options, ``SO_RCVBUF`` and ``SO_SNDBUF`` then accept values up to 65535 << 14.
+
 * PTP Clock
 
   * :c:func:`ptp_clock_adjust_rate` adjusts the clock rate by an offset in scaled parts per
@@ -124,6 +128,19 @@ Libraries / Subsystems
 
   * :ref:`MQTT 5.0 <mqtt_socket_interface>` support in the MQTT client
     (:kconfig:option:`CONFIG_MQTT_VERSION_5_0`) is no longer experimental.
+
+* Utilities
+
+  * :c:func:`utf8_is_valid` checks a given number of bytes for well-formed UTF-8
+    as defined in :rfc:`3629`; overlong sequences, UTF-16 surrogates and code
+    points above U+10FFFF are refused.
+
+* Shell
+
+  * With :kconfig:option:`CONFIG_SHELL_WILDCARD` enabled, an argument containing ``*`` or ``?``
+    that matches no subcommand is now passed to the command handler unchanged. Previously the
+    command was run without that argument and its remaining arguments, which usually failed
+    with a wrong argument count.
 
 Devicetree
 **********
@@ -147,6 +164,10 @@ Devicetree
     The :ref:`TLS credentials shell <tls_credentials_shell>` has the new ``cred keygen``,
     ``cred keydel``, ``cred csr`` and ``cred pubkey`` commands, and the
     :zephyr:code-sample:`tls-keygen` sample shows the full flow.
+
+* ESP32 SDHC slots support GPIO-based card detection, including GPIOs on external expanders.
+  Configure the optional ``cd-gpios`` property in :dtcompatible:`espressif,esp32-sdhc-slot`.
+  An optional sleep pinctrl state controls the signal pins while card power is off.
 
 Other notable changes
 *********************

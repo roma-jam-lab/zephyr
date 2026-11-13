@@ -23,6 +23,11 @@ the :ref:`release notes<zephyr_4.6>`.
 Common
 ******
 
+* The :file:`scripts/footprint/size_report`, :file:`scripts/footprint/compare_footprint`, and
+  :file:`scripts/kconfig/diffconfig` scripts have been renamed to
+  :file:`scripts/footprint/size_report.py`, :file:`scripts/footprint/compare_footprint.py`, and
+  :file:`scripts/kconfig/diffconfig.py`, respectively. Users must update their invocations.
+
 Build System
 ************
 
@@ -64,6 +69,51 @@ Boards
 * LiteX: The deprecated ``CONFIG_LITEX_CSR_DATA_WIDTH`` Kconfig option has been removed. Only the
   32 bit CSR data width is supported. Designs that use an 8 bit CSR data width must be rebuilt with
   a 32 bit CSR data width. (:github:`124793`)
+
+* The Andes AE350 SoC is now provided per AndesCore core, for example ``ae350_a25`` for the A25
+  core. The ``ae350`` SoC and :kconfig:option:`CONFIG_SOC_AE350` are deprecated and will be
+  removed in a future release. Kconfig, CMake and code checking
+  :kconfig:option:`CONFIG_SOC_AE350` should check :kconfig:option:`CONFIG_SOC_SERIES_AE350`
+  instead. (:github:`122288`)
+
+  * The AE350 board targets of :zephyr:board:`adp_xc7k` and
+    :zephyr:board:`tang_mega_138k_pro_dock` have been renamed after the core. The previous board
+    targets are deprecated and map to the new board targets:
+
+    * ``adp_xc7k/ae350`` to ``adp_xc7k/ae350_a25``
+    * ``adp_xc7k/ae350/clic`` to ``adp_xc7k/ae350_d23/clic``
+    * ``tang_mega_138k_pro_dock/ae350`` to ``tang_mega_138k_pro_dock/ae350_a25``
+    * ``tang_mega_138k_pro_dock/ae350/demo`` to ``tang_mega_138k_pro_dock/ae350_a25/demo``
+
+  * Applications must rename their board specific files after the new board targets, for
+    example :file:`boards/adp_xc7k_ae350.overlay` to :file:`boards/adp_xc7k_ae350_a25.overlay`,
+    as the files named after the previous board targets are no longer applied. Kconfig, CMake
+    and code checking ``CONFIG_BOARD_ADP_XC7K_AE350`` must check
+    ``CONFIG_BOARD_ADP_XC7K_AE350_A25`` instead.
+  * Out-of-tree boards using the ``ae350`` SoC should use the ``ae350_<core>`` SoC of their core
+    in ``board.yml``, rename the board files named after the SoC, select ``SOC_AE350_<core>``
+    instead of ``SOC_AE350``, and include the :file:`riscv/andes/andes_v5_ae350_<core>.dtsi` of
+    their core. Boards describing their own CPU nodes must use the compatible of the core, for
+    example :dtcompatible:`andestech,a25`, which enables the ``CONFIG_CPU_ANDES_<core>`` option
+    selecting the CPU features of the core.
+  * :file:`riscv/andes/andes_v5_ae350.dtsi` now describes a single CPU instead of eight, and the
+    PLIC also has the supervisor mode context of the hart. Out-of-tree boards including it must
+    drop the deletes of the other CPU nodes. Multicore boards must add the other CPU nodes and
+    add them to the ``interrupts-extended`` of ``plic0``, ``mtimer`` and ``plic_sw``, or include
+    the :file:`riscv/andes/andes_v5_ae350_<core>mp.dtsi` of their core.
+
+* The RAKwireless ``rak3172`` board is renamed to :zephyr:board:`rak3272s`. It
+  was named after the WisDuo stamp module it carries rather than the board it
+  describes, which is the RAK3272S Breakout Board. The other carrier for the
+  same module is the new :zephyr:board:`rak3372` WisBlock Core Module.
+  :file:`boards/deprecated.cmake` keeps ``-b rak3172`` working with a warning,
+  but out-of-tree code testing ``CONFIG_BOARD_RAK3172`` must switch to
+  ``CONFIG_BOARD_RAK3272S``.
+
+* :zephyr:board:`rak3272s` no longer defines ``led0``. The RAK3272S carries no
+  LEDs and leaves the two module pins the nodes used unrouted. Applications
+  that relied on the alias, such as :zephyr:code-sample:`blinky`, need an
+  overlay pointing at a LED wired to the headers.
 
 Device Drivers and Devicetree
 *****************************
@@ -118,6 +168,15 @@ Audio Codec
   When using a :dtcompatible:`fixed-clock` node,
   :kconfig:option:`CONFIG_CLOCK_CONTROL_FIXED_RATE_CLOCK` must be enabled.
 
+Clock control
+=============
+
+* NXP MCXC and K32L2B3 SoCs now use the :dtcompatible:`nxp,mcg-lite` binding and driver
+  for the MCG-Lite clock generator. Out-of-tree devicetrees must update the mcg node to use
+  the new compatible and replace any use of ``KINETIS_MCG_OUT_CLK`` with
+  ``NXP_MCG_LITE_OUT_CLK``. The ``lircdiv2`` property is no longer supported by
+  :dtcompatible:`nxp,kinetis-mcg` and should be removed from existing devicetrees.
+
 Comparator
 ==========
 
@@ -169,6 +228,28 @@ Ethernet
   on every Ethernet interface when :kconfig:option:`CONFIG_NET_LLDP` is set. Out-of-tree Ethernet
   drivers must stop reporting it. (:github:`124787`)
 
+I2S
+===
+
+* :kconfig:option:`CONFIG_I2S_NATIVE_SIM_RX_FILE_PATH` and
+  :kconfig:option:`CONFIG_I2S_NATIVE_SIM_TX_FILE_PATH` are deprecated. Use
+  :kconfig:option:`CONFIG_I2S_NATIVE_SIM_RX_PATH` and
+  :kconfig:option:`CONFIG_I2S_NATIVE_SIM_TX_PATH`, which also accept ALSA devices. Without the
+  ALSA backend the old options still provide their default. (:github:`123474`)
+
+Modem
+=====
+
+* Sierra Wireless HL78xx: the ``CONFIG_HL78XX_EVT_MONITOR_HEAP_SIZE`` option has been replaced
+  by :kconfig:option:`CONFIG_HL78XX_EVT_MONITOR_QUEUE_DEPTH`. The queue of notifications
+  waiting for the deferred event monitors is now sized as a number of notifications instead of
+  a heap size in bytes. Applications that set the old option must remove it, and set the new
+  one if the default of 16 notifications is not enough. A notification that does not fit is
+  dropped and counted; the count is available from
+  :c:func:`hl78xx_evt_monitor_dropped_count`. The slots are reserved statically, one queued
+  notification each, so the default of 16 uses more RAM than the 256-byte heap it replaces.
+  (:github:`120425`)
+
 OPAMP
 =====
 
@@ -186,6 +267,19 @@ OPAMP
   a runtime reference on the reference source while it measures an amplifier fed by it. Builds
   without device runtime PM are unaffected: the device is resumed at init and the instance comes
   up enabled as before. (:github:`122135`)
+
+PCIe
+====
+
+* :c:func:`pcie_msi_map` now returns ``uint64_t`` instead of ``uint32_t``, and the ``address``
+  member of :c:struct:`msi_vector_generic` is now ``uint64_t``. Out-of-tree implementations of
+  :c:func:`pcie_msi_map` and code that reads the MSI vector address must be updated. The ITS
+  getter (:c:func:`its_get_msi_addr`) also returns ``uint64_t``. (:github:`124156`)
+
+* A 32-bit MSI capability whose ITS target address is above 4 GiB now makes
+  :c:func:`pcie_msi_enable` return false without writing the configuration space or enabling bus
+  mastering; dependent drivers such as NVMe, ivshmem and IGC fail to initialize. This is
+  intentional: use a 64-bit MSI capability or a target address below 4 GiB. (:github:`124156`)
 
 PTP Clock
 =========
@@ -205,6 +299,35 @@ PTP Clock
   parts per billion, and :c:func:`ptp_clock_adjust_by_scaled_ppm` to compute the value of an
   addend register from its nominal value. All in-tree drivers have been converted.
   (:github:`120828`)
+
+Timers
+======
+
+* The deprecated Cortex-M SysTick low-power companion Kconfig options have been removed.
+  Replace them with their generic system timer equivalents:
+
+  .. list-table::
+     :header-rows: 1
+
+     * - Removed option
+       - Replacement
+     * - ``CONFIG_CORTEX_M_SYSTICK_LPM_TIMER_NONE``
+       - :kconfig:option:`CONFIG_SYSTEM_TIMER_LPM_COMPANION_NONE`
+     * - ``CONFIG_CORTEX_M_SYSTICK_LPM_TIMER_COUNTER``
+       - :kconfig:option:`CONFIG_SYSTEM_TIMER_LPM_COMPANION_COUNTER`
+     * - ``CONFIG_CORTEX_M_SYSTICK_LPM_TIMER_HOOKS``
+       - :kconfig:option:`CONFIG_SYSTEM_TIMER_LPM_COMPANION_HOOKS`
+     * - ``CONFIG_CORTEX_M_SYSTICK_RESET_BY_LPM``
+       - :kconfig:option:`CONFIG_SYSTEM_TIMER_RESET_BY_LPM`
+
+* The deprecated chosen ``/chosen/zephyr,cortex-m-idle-timer`` is no longer supported. Use the
+  :ref:`zephyr,system-timer-companion <devicetree-chosen-nodes>` chosen instead to select the
+  low-power companion counter.
+
+* The deprecated ``drivers/timer/cortex_m_systick.h`` compatibility header has been removed.
+  Include :zephyr_file:`include/zephyr/drivers/timer/system_timer_lpm.h` instead, and replace
+  ``z_cms_lptim_hook_on_lpm_entry`` and ``z_cms_lptim_hook_on_lpm_exit`` with
+  :c:func:`z_sys_clock_lpm_enter` and :c:func:`z_sys_clock_lpm_exit`, respectively. (:github:`124238`).
 
 .. zephyr-keep-sorted-stop
 
@@ -263,6 +386,19 @@ Bluetooth Host
   multiplied by ``CONFIG_BT_MAX_CONN``, which keeps every connection's capacity independent
   of the other connections.
 
+Bluetooth Mesh
+==============
+
+* The deprecated legacy provisioning OOB API was removed together with the
+  ``CONFIG_BT_MESH_PROV_OOB_API_LEGACY`` Kconfig option. The maximum numeric OOB
+  authentication size is now always 32 bytes. Applications must replace:
+
+  * ``bt_mesh_input_number()`` with :c:func:`bt_mesh_input_numeric`, which takes the
+    numeric value as a little-endian byte array and its size.
+  * The ``output_number`` callback of :c:struct:`bt_mesh_prov` with
+    :c:member:`bt_mesh_prov.output_numeric`, which receives the numeric value as a
+    little-endian byte array and its size.
+
 Networking
 **********
 
@@ -279,6 +415,28 @@ Networking
   Applications that use the first result now connect over IPv6 where they used IPv4. Enable
   :kconfig:option:`CONFIG_NET_SOCKETS_DNS_PREFER_IPV4` to keep IPv4 first, for example with
   offloaded network interfaces, where reachability cannot be determined.
+
+* Network interface driver APIs are now device API classes. Out-of-tree network drivers must define
+  their API instances with :c:macro:`DEVICE_API` and use the renamed structs:
+
+  * ``struct net_if_api`` is now :c:struct:`net_if_driver_api`.
+  * ``struct ethernet_api`` is now :c:struct:`ethernet_driver_api`.
+  * ``struct dummy_api`` is now :c:struct:`dummy_driver_api`.
+  * ``struct ppp_api`` is now :c:struct:`ppp_driver_api`.
+  * ``struct canbus_api`` is now :c:struct:`canbus_driver_api`.
+  * ``struct offloaded_if_api`` is now :c:struct:`offloaded_if_driver_api`.
+  * ``struct virtual_interface_api`` is now :c:struct:`virtual_interface_driver_api`.
+  * ``struct hdlc_api`` is now :c:struct:`hdlc_driver_api`.
+  * ``struct ieee802154_radio_api`` is now :c:struct:`ieee802154_radio_driver_api`.
+
+  For example, ``static const struct ethernet_api api = {...}`` becomes
+  ``static DEVICE_API(ethernet, api) = {...}``. API instances are now always constant, and cannot
+  be modified at runtime. (:github:`124334`)
+
+* Wi-Fi drivers must define their API with ``DEVICE_API(wifi_native, name)`` when
+  :kconfig:option:`CONFIG_WIFI_USE_NATIVE_NETWORKING` is enabled, or with
+  ``DEVICE_API(wifi_offload, name)`` otherwise. ``struct net_wifi_mgmt_offload`` remains available
+  to refer to the selected type. (:github:`124334`)
 
 Other subsystems
 ****************

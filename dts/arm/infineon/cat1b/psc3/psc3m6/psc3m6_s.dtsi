@@ -242,6 +242,25 @@
 			status = "disabled";
 		};
 
+		lpcomp0: comparator@52430000 {
+			compatible = "infineon,lp-comp";
+			reg = <0x52430000 0x10000>;
+			interrupts = <37 4>;
+			status = "disabled";
+
+			lpcomp0_0: lpcomp0-0 {
+				compatible = "infineon,lp-comp-channel";
+				channel = <0>;
+				status = "disabled";
+			};
+
+			lpcomp0_1: lpcomp0-1 {
+				compatible = "infineon,lp-comp-channel";
+				channel = <1>;
+				status = "disabled";
+			};
+		};
+
 		canfd0: canfd@52800000 {
 			compatible = "infineon,canfd-controller";
 			reg = <0x52800000 0x1088>, <0x52810000 0x1000>;
@@ -371,5 +390,17 @@
 	sram0: memory@34000000 {
 		compatible = "mmio-sram";
 		reg = <0x34000000 0x20000>;
+	};
+
+	flash_controller: flash-controller@52150000 {
+		compatible = "infineon,flash-controller";
+		reg = <0x52150000 0x10000>;
+		ranges;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		erase-value = <0x00>;
+		infineon,cache-invalidate = "icache0";
+		infineon,explicit-erase;
+		status = "disabled";
 	};
 };

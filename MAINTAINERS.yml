@@ -366,12 +366,20 @@ ARM64 arch:
     - kernel
 
 ASPEED Platforms:
-  status: odd fixes
+  status: maintained
+  maintainers:
+    - billy-tsai
   files:
+    - boards/aspeed/
     - soc/aspeed/
     - dts/arm/aspeed/
+    - dts/riscv/aspeed/
+    - dts/bindings/*/aspeed,*
     - drivers/*/*_ast10x0.c
+    - drivers/*/*_ast27xx*.c
+    - drivers/*/*ast2700*.c
     - drivers/*/Kconfig.aspeed
+    - include/zephyr/dt-bindings/*/ast27xx*
   labels:
     - "platform: ASPEED"
 
@@ -2558,6 +2566,7 @@ Documentation Infrastructure:
   status: odd fixes
   collaborators:
     - ithinuel
+    - TomasGalbickaNXP
   files:
     - include/zephyr/drivers/mbox.h
     - drivers/mbox/
@@ -2823,7 +2832,9 @@ Documentation Infrastructure:
     - drivers.regulator
 
 "Drivers: Reset":
-  status: odd fixes
+  status: maintained
+  maintainers:
+    - andrei-edward-popa
   files:
     - drivers/reset/
     - include/zephyr/drivers/reset.h
@@ -3080,6 +3091,7 @@ Documentation Infrastructure:
     - tgorochowik
   collaborators:
     - kgugala
+    - hongquan-prog
   files:
     - drivers/virtio/
     - dts/bindings/virtio/
@@ -3380,6 +3392,17 @@ Ezurio platforms:
   labels:
     - "platform: Ezurio"
 
+Fastbit Platforms:
+  status: maintained
+  maintainers:
+    - kiran-fastbit
+    - shreyas-fastbit
+  files:
+    - boards/fastbit/
+    - dts/bindings/gpio/fastbit,nano-header.yaml
+  labels:
+    - "platform: Fastbit"
+
 Filesystems:
   status: maintained
   maintainers:
@@ -3548,6 +3571,7 @@ IPC:
     - anangl
   collaborators:
     - arnopo
+    - TomasGalbickaNXP
   files:
     - include/zephyr/ipc/
     - samples/subsys/ipc/
@@ -4722,6 +4746,9 @@ NXP Platforms (MPU):
     - tests/arch/arm64/arm64_gicv3_its/boards/imx*.conf
   files-regex:
     - boards/nxp/.*m?imx[^(rt)].*/
+  files-exclude:
+    - drivers/video/imx*
+    - drivers/video/Kconfig.imx*
   labels:
     - "platform: NXP MPU"
     - "platform: NXP"
@@ -5624,6 +5651,17 @@ RX arch:
     - arch.rx
     - arch
     - kernel
+
+Radxa ROCK 5B Platforms:
+  status: maintained
+  maintainers:
+    - zevorn
+  files:
+    - boards/radxa/rock_5b/
+    - boards/radxa/rock_5b_plus/
+    - boards/radxa/common/rk3588_rock_5b_common.dtsi
+  labels:
+    - "platform: Rockchip"
 
 Random:
   status: maintained
@@ -6959,6 +6997,15 @@ WCH Platforms:
     - dts/bindings/*/wch,*
   labels:
     - "platform: WinChipHead"
+
+Waveshare Platforms:
+  status: maintained
+  maintainers:
+    - hongquan-prog
+  files:
+    - boards/waveshare/
+  labels:
+    - "platform: Waveshare"
 
 West:
   status: maintained
