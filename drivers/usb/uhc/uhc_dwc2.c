@@ -115,10 +115,10 @@ struct uhc_dwc2_channel_data {
 	uint8_t next_pid;
 	/* Next scheduled frame for the periodic transfer */
 	uint16_t scheduled_frame;
-	/* Periodic transfer has been queued and active */
-	bool periodic_started;
-	/* Periodic transfer has been scheduled and waiting for the SOF */
-	bool periodic_scheduled;
+	/* Initial polling schedule of periodic transfer has been established */
+	bool periodic_initialized;
+	/* Periodic transfer has a scheduled frame and is waiting for the driver to start it */
+	bool periodic_start_pending;
 };
 
 struct uhc_dwc2_split_info {
@@ -823,6 +823,57 @@ static int port_resume(const struct device *const dev)
 	return ret;
 }
 
+static void ch_schedule_interrupt(const struct device *dev,
+				  struct uhc_dwc2_channel *const ch)
+{
+	struct usb_dwc2_reg *const base = uhc_dwc2_get_base(dev);
+	struct uhc_transfer *const xfer = ch->xfer;
+	uint16_t interval = xfer->interval;
+	uint32_t hfnum;
+	uint16_t current_frame;
+
+	/*
+	 * TODO: Refactor with adding an argument "periods", that represents
+	 * number of missed polling intervals: ch_schedule_interrupt(dev, ch, 1U);
+	 * Use it in port_sof().
+	 */
+	if (ch->do_split) {
+		interval *= 8U;
+	}
+
+	hfnum = sys_read32((mem_addr_t)&base->hfnum);
+	current_frame = usb_dwc2_get_hfnum_frnum(hfnum);
+
+	if (!ch->data->periodic_initialized) {
+		/*
+		 * We don't start the interrupt transfer immediately,
+		 * just schedule at the next frame (1U) for direct conntection and
+		 * at the next 3rd frame (3U), when device is behing the High-speed hub.
+		 */
+		ch->data->scheduled_frame = (current_frame + (ch->do_split ? 3U : 1U)) &
+					    PERIODIC_FRAME_MASK;
+
+		if (ch->do_split) {
+			/* Align the initial SSPLIT to Y0. */
+			ch->data->scheduled_frame =
+				ROUND_UP(ch->data->scheduled_frame, 8U) &
+				PERIODIC_FRAME_MASK;
+		}
+
+		ch->data->periodic_initialized = true;
+	} else {
+		/*
+		 * The interrupt transfer is already active,
+		 * preserve periodic phase by using the polling interval
+		 * and mark the channel for periodic transfer in the closest SOF
+		 */
+		ch->data->scheduled_frame =
+			(ch->data->scheduled_frame + interval) &
+			PERIODIC_FRAME_MASK;
+		ch->data->periodic_start_pending = true;
+	}
+}
+
 static void ch_rewind(const struct device *dev, struct uhc_dwc2_channel *const ch)
 {
 	ARG_UNUSED(dev);
@@ -878,13 +929,26 @@ static void ch_enable(const struct device *dev, struct uhc_dwc2_channel *const c
 			 * CSPLIT, the TT's valid response window can expired.
 			 * We need to respect the permitted window, in this
 			 * matters, add the warning with some appropriate delay
-			 * to catch the problem appearance.
+			 * to catch the problem appearance. Use (5U) as a permitted
+			 * window.
 			 */
 			if (elapsed > 5U) {
+				if (ch->xfer->type == USB_EP_TYPE_INTERRUPT &&
+				USB_EP_DIR_IS_IN(ch->xfer->ep)) {
+					/*
+					 * The CSPLIT response window has expired.
+					 * Abandon this polling attempt and schedule
+					 * a fresh SSPLIT at the next interval.
+					 */
+					ch->split_state = UHC_DWC2_SPLIT_SSPLIT;
+					ch_schedule_interrupt(dev, ch);
+					return;
+				}
 				/*
-				 * TODO: Revisit this check when implementing periodic split
-				 * transactions. The current threshold is not validated for
-				 * CONTROL/BULK transfers and must not be treated as a timeout.
+				 * TODO: We do not need to enable the channel after
+				 * detecting an expired CSPLIT.
+				 * Return to this and change it to error, after having
+				 * reliable reproduction mechanism.
 				 */
 				LOG_WRN("CSPLIT late, elapsed %u", elapsed);
 			}
@@ -1633,6 +1697,19 @@ static uint32_t ch_handle_in_interrupt(struct uhc_dwc2_channel *const ch,
 {
 	uint32_t ch_events = 0;
 
+	if (ch->do_split) {
+		switch (ch->split_state) {
+		case UHC_DWC2_SPLIT_SSPLIT:
+			return ch_handle_in_ssplit(ch, hcint);
+		case UHC_DWC2_SPLIT_CSPLIT:
+			return ch_handle_in_csplit(ch, hcint);
+		default:
+			LOG_ERR("Invalid Interrupt IN SPLIT state");
+			return BIT(UHC_DWC2_CHANNEL_EVENT_ERROR) |
+			BIT(UHC_DWC2_CHANNEL_DO_RELEASE);
+		}
+	}
+
 	if (hcint & USB_DWC2_HCINT_CHHLTD) {
 		if (hcint & (USB_DWC2_HCINT_XFERCOMPL | USB_DWC2_HCINT_STALL |
 			     USB_DWC2_HCINT_BBLERR)) {
@@ -1693,6 +1770,77 @@ static uint32_t ch_handle_in_interrupt(struct uhc_dwc2_channel *const ch,
 	return ch_events;
 }
 
+static uint32_t ch_handle_out_interrupt(struct uhc_dwc2_channel *const ch,
+					uint32_t hcint)
+{
+	uint32_t ch_events = 0;
+
+	if (ch->do_split) {
+		switch (ch->split_state) {
+		case UHC_DWC2_SPLIT_SSPLIT:
+			return ch_handle_out_ssplit(ch, hcint);
+		case UHC_DWC2_SPLIT_CSPLIT:
+			return ch_handle_out_csplit(ch, hcint);
+		default:
+			LOG_ERR("Invalid Interrupt OUT SPLIT state");
+			return BIT(UHC_DWC2_CHANNEL_EVENT_ERROR) |
+			BIT(UHC_DWC2_CHANNEL_DO_RELEASE);
+		}
+	}
+
+	if (hcint & USB_DWC2_HCINT_CHHLTD) {
+		if (hcint & USB_DWC2_HCINT_XFERCOMPL) {
+			/* Transfer completed successfully. */
+			ch->error_count = 0;
+			ch_events |= BIT(UHC_DWC2_CHANNEL_EVENT_CPLT);
+			ch_events |= BIT(UHC_DWC2_CHANNEL_DO_RELEASE);
+
+		} else if (hcint & USB_DWC2_HCINT_STALL) {
+			/* Endpoint STALL. */
+			ch->error_count = 0;
+			ch_events |= BIT(UHC_DWC2_CHANNEL_EVENT_STALL);
+			ch_events |= BIT(UHC_DWC2_CHANNEL_DO_RELEASE);
+
+		} else if (hcint & USB_DWC2_HCINT_XACTERR) {
+			/* Transaction error: retry at the next interval. */
+			ch->error_count++;
+
+			if (ch->error_count >= 3) {
+				LOG_ERR("OUT channel%d error retry limit, HCINT 0x%08x",
+					ch->index, hcint);
+				ch_events |= BIT(UHC_DWC2_CHANNEL_EVENT_ERROR);
+				ch_events |= BIT(UHC_DWC2_CHANNEL_DO_RELEASE);
+			} else {
+				LOG_DBG("OUT channel%d error, HCINT 0x%08x, retry %u",
+					ch->index, hcint, ch->error_count);
+				ch_events |= BIT(UHC_DWC2_CHANNEL_DO_WAIT_SOF);
+			}
+
+		} else if (hcint & (USB_DWC2_HCINT_NAK |
+				    USB_DWC2_HCINT_NYET |
+				    USB_DWC2_HCINT_FRMOVRUN)) {
+			ch->error_count = 0;
+			ch_events |= BIT(UHC_DWC2_CHANNEL_DO_WAIT_SOF);
+
+		} else {
+			LOG_ERR("OUT channel%d halted, HCINT 0x%08x",
+				ch->index, hcint);
+			ch_events |= BIT(UHC_DWC2_CHANNEL_EVENT_ERROR);
+			ch_events |= BIT(UHC_DWC2_CHANNEL_DO_RELEASE);
+		}
+	} else if (hcint & (USB_DWC2_HCINT_ACK |
+			    USB_DWC2_HCINT_NAK)) {
+		/* Wait for the channel halt event. */
+		LOG_DBG("OUT channel%d ACK/NAK, HCINT 0x%08x",
+			ch->index, hcint);
+	} else {
+		LOG_WRN("OUT channel%d not halted, HCINT 0x%08x",
+			ch->index, hcint);
+	}
+
+	return ch_events;
+}
+
 static uint32_t ch_handle_irq_events(const struct device *dev,
 				     struct uhc_dwc2_channel *const ch)
 {
@@ -1745,9 +1893,7 @@ static uint32_t ch_handle_irq_events(const struct device *dev,
 		if (USB_EP_DIR_IS_IN(xfer->ep)) {
 			ch_events = ch_handle_in_interrupt(ch, hcint);
 		} else {
-			LOG_ERR("Interrupt OUT isn't supported yet");
-			ch_events = BIT(UHC_DWC2_CHANNEL_EVENT_ERROR) |
-				    BIT(UHC_DWC2_CHANNEL_DO_RELEASE);
+			ch_events = ch_handle_out_interrupt(ch, hcint);
 		}
 	} else {
 		LOG_ERR("Unhandled transfer type %u, HCINT 0x%08x", xfer->type, hcint);
@@ -1881,11 +2027,6 @@ static int ch_claim(const struct device *const dev,
 		LOG_ERR("No channel data slot for addr %u ep 0x%02x", xfer->udev->addr, xfer->ep);
 		return -ENOMEM;
 	}
-
-	/* TODO: It is better to release the channel, when scheduled, flush for now */
-	ch->data->scheduled_frame = 0;
-	ch->data->periodic_started = false;
-	ch->data->periodic_scheduled = false;
 
 	priv->free_chs--;
 
@@ -2040,8 +2181,8 @@ static void ch_release(const struct device *dev, struct uhc_dwc2_channel *const 
 	ch->xfer = NULL;
 
 	ch->data->scheduled_frame = 0;
-	ch->data->periodic_started = false;
-	ch->data->periodic_scheduled = false;
+	ch->data->periodic_initialized = false;
+	ch->data->periodic_start_pending = false;
 	ch->data = NULL;
 
 	ch->halt_cancel = false;
@@ -2182,39 +2323,6 @@ static void ch_start_bulk(const struct device *dev,
 	ch_enable(dev, ch);
 }
 
-static void ch_schedule_interrupt(const struct device *dev,
-				  struct uhc_dwc2_channel *const ch)
-{
-	struct usb_dwc2_reg *const base = uhc_dwc2_get_base(dev);
-	struct uhc_transfer *const xfer = ch->xfer;
-	uint32_t hfnum;
-	uint16_t current_frame;
-
-	hfnum = sys_read32((mem_addr_t)&base->hfnum);
-	current_frame = usb_dwc2_get_hfnum_frnum(hfnum);
-
-	if (!ch->data->periodic_started) {
-		/*
-		 * We don't start the interrupt transfer immediately,
-		 * just schedule at the next frame
-		 * and calculate the parity in ch_start_interrupt()
-		 */
-		ch->data->scheduled_frame = (current_frame + 1U) & PERIODIC_FRAME_MASK;
-		ch->data->periodic_started = true;
-	} else {
-		/*
-		 * The interrupt transfer is already active,
-		 * preserve periodic phase by using the polling interval
-		 * and mark the channel for periodic transfer in the closest SOF
-		 */
-
-		/* TODO: Consider the High-speed microframes as well, only Full-speed for now */
-		ch->data->scheduled_frame = (ch->data->scheduled_frame + xfer->interval) &
-					     PERIODIC_FRAME_MASK;
-		ch->data->periodic_scheduled = true;
-	}
-}
-
 static void ch_start_interrupt(const struct device *dev,
 			       struct uhc_dwc2_channel *const ch)
 {
@@ -2227,21 +2335,17 @@ static void ch_start_interrupt(const struct device *dev,
 	uint32_t hfnum;
 	uint16_t frame;
 
-	ch->length = MIN(net_buf_tailroom(xfer->buf), xfer->mps);
-	dma_addr = (mem_addr_t)net_buf_tail(xfer->buf);
+	/* TODO: Split for multipacket? */
 
-	LOG_DBG("INT IN, ch=%u, ep=%02Xh, mps=%u, interval=%u, size=%u, pid=%u, frame=%u",
-		ch->index,
-		xfer->ep,
-		xfer->mps,
-		xfer->interval,
-		ch->length,
-		ch->data->next_pid,
-		ch->data->scheduled_frame);
+	if (USB_EP_DIR_IS_IN(xfer->ep)) {
+		ch->length = MIN(net_buf_tailroom(xfer->buf), xfer->mps);
+		dma_addr = (mem_addr_t)net_buf_tail(xfer->buf);
+	} else {
+		ch->length = MIN(xfer->buf->len, xfer->mps);
+		dma_addr = (mem_addr_t)(xfer->buf->data /* + ch->offset */);
+	}
 
 	pkt_cnt = calc_packet_count(ch->length, xfer->mps);
-
-	/* TODO: Do not forget to flush pids on disconnection. Remove if 120943 is merged. */
 
 	hctsiz = usb_dwc2_set_hctsiz_pid(ch->data->next_pid) |
 		 usb_dwc2_set_hctsiz_pktcnt(pkt_cnt) |
@@ -2264,13 +2368,15 @@ static void ch_start_interrupt(const struct device *dev,
 	frame = usb_dwc2_get_hfnum_frnum(hfnum);
 
 	if (periodic_frame_overrun(frame, ch->data->scheduled_frame)) {
-		/* We already missed the frame, schedule to the next suitable frame */
+		/*
+		 * TODO: With bInterval=1, processing delays (e.g. debug logging or high load)
+		 * may cause repeated frame overruns. Rescheduling relative to the
+		 * previous scheduled frame may never catch up with the current frame.
+		 * Maybe need to adjust the schedule based on the current frame.
+		 */
 		ch_schedule_interrupt(dev, ch);
-		/* TODO: Emulate the situation, when we passed two frame intervals */
 		return;
 	}
-
-	/* TODO: Split? */
 
 	hcchar = sys_read32((mem_addr_t)&ch->regs->hcchar);
 
@@ -2280,9 +2386,9 @@ static void ch_start_interrupt(const struct device *dev,
 		hcchar &= ~USB_DWC2_HCCHAR_ODDFRM;
 	}
 
-	hcchar |= USB_DWC2_HCCHAR_CHENA;
-	hcchar &= ~USB_DWC2_HCCHAR_CHDIS;
 	sys_write32(hcchar, (mem_addr_t)&ch->regs->hcchar);
+
+	ch_enable(dev, ch);
 }
 
 static void ch_reinit(const struct device *dev,
@@ -2330,15 +2436,21 @@ static void port_sof(const struct device *dev)
 			continue;
 		}
 
-		/* Handle pending split first */
+		/*
+		 * TODO: Schedule periodic CSPLIT transactions in valid microframes (Y2-Y4).
+		 * Currently, CSPLIT may be issued in the same microframe as SSPLIT.
+		 * For Interrupt transfers, schedule the first CSPLIT two microframes
+		 * after SSPLIT, with subsequent retries within the TT response window.
+		 * Use the actual SSPLIT microframe as the scheduling reference.
+		 */
 		if (ch->split_scheduled) {
 			ch->split_scheduled = false;
 			ch_enable(dev, ch);
 			continue;
 		}
 
-		/* Handle periodic transfers. */
-		if (!ch->data->periodic_scheduled) {
+		/* Handle periodic transfers if it is pending. */
+		if (!ch->data->periodic_start_pending) {
 			continue;
 		}
 
@@ -2347,12 +2459,31 @@ static void port_sof(const struct device *dev)
 		next_frame = (usb_dwc2_get_hfnum_frnum(hfnum) + 1U) & PERIODIC_FRAME_MASK;
 
 		if (next_frame == ch->data->scheduled_frame) {
-			LOG_DBG("Channel%d schedule periodic to frame=%u",
-				ch->index,
-				ch->data->scheduled_frame);
-
-			ch->data->periodic_scheduled = false;
+			/* Start transfer */
+			ch->data->periodic_start_pending = false;
 			ch_start_interrupt(dev, ch);
+		} else if (periodic_frame_overrun(next_frame, ch->data->scheduled_frame)) {
+			/* Recover missed frame */
+			uint32_t interval = ch->xfer->interval;
+			uint16_t missed;
+
+			if (ch->do_split) {
+				interval *= 8U;
+			}
+
+			/*
+			 * Instead of simply adding one polling interval, advance
+			 * the schedule by enough intervals to reach the next opportunity.
+			 */
+			missed = (next_frame - ch->data->scheduled_frame) &
+				PERIODIC_FRAME_MASK;
+
+			ch->data->scheduled_frame =
+				(ch->data->scheduled_frame +
+				((missed / interval) + 1U) * interval) &
+				PERIODIC_FRAME_MASK;
+		} else {
+			/* Otherwise, wait for the scheduled frame. */
 		}
 	}
 }
@@ -2528,13 +2659,14 @@ static int validate_bulk_xfer(const struct uhc_transfer *xfer)
 			LOG_WRN("BULK IN buffer size %u is not a multiple of MPS %u; "
 				"DMA may exceed buffer capacity",
 				size, xfer->mps);
-
 			/*
 			 * TODO: The final BULK IN packet may require more DMA space
 			 * than the destination buffer provides. Consider using an
 			 * internal MPS-sized DMA temp buffer for the last packet, then
 			 * copying only the actual received bytes to xfer->buf to avoid
 			 * potential overflow and unaligned access.
+			 *
+			 * Might be removed after 110162 is merged.
 			 */
 		}
 	} else {
@@ -2567,11 +2699,13 @@ static int validate_interrupt_xfer(const struct uhc_transfer *xfer)
 		LOG_ERR("Interrupt transfer requires buffer");
 		return -EINVAL;
 	}
-	/* TODO: Support only IN EP for now */
-	if (!USB_EP_DIR_IS_IN(xfer->ep)) {
-		LOG_ERR("Interrupt OUT is not supported yet");
-		return -ENOTSUP;
-	}
+
+	/*
+	 * TODO: Support multi-packet Interrupt transfers.
+	 * Currently, each transfer handles at most one packet (MPS).
+	 * A larger IN buffer is allowed, but only one packet is received.
+	 * OUT transfers exceeding MPS are rejected.
+	 */
 
 	if (xfer->mps == 0U || xfer->mps > 1024U) {
 		LOG_ERR("Invalid interrupt MPS %u", xfer->mps);
@@ -2589,20 +2723,40 @@ static int validate_interrupt_xfer(const struct uhc_transfer *xfer)
 		return -EINVAL;
 	}
 
-	/* The buffer must have space for at least one packet. */
-	if (net_buf_tailroom(xfer->buf) == 0) {
-		LOG_ERR("Interrupt IN transfer has no tailroom");
-		return -ENOMEM;
-	}
-
 	/*
 	 * DWC2 DMA mode requires word-aligned DMA buffers.
-	 * For IN, DMA writes to net_buf_tail().
 	 */
-	if (!IS_ALIGNED(net_buf_tail(xfer->buf), 4)) {
-		LOG_ERR("Interrupt IN buffer tail %p is not 4-byte aligned",
-			net_buf_tail(xfer->buf));
-		return -EINVAL;
+	if (USB_EP_DIR_IS_IN(xfer->ep)) {
+		/* IN requires space for the received packet. */
+		if (net_buf_tailroom(xfer->buf) == 0) {
+			LOG_ERR("Interrupt IN transfer has no tailroom");
+			return -ENOMEM;
+		}
+
+		if (!IS_ALIGNED(net_buf_tail(xfer->buf), 4)) {
+			LOG_ERR("Interrupt IN buffer tail %p is not 4-byte aligned",
+				net_buf_tail(xfer->buf));
+			return -EINVAL;
+		}
+	} else {
+		/* OUT payload is already present in the buffer. */
+		if (xfer->buf->len == 0) {
+			LOG_ERR("Interrupt OUT ZLP is not supported");
+			return -ENOTSUP;
+		}
+
+		/* Only single-packet OUT transfers for now. */
+		if (xfer->buf->len > xfer->mps) {
+			LOG_ERR("Interrupt OUT length %u exceeds MPS %u",
+				xfer->buf->len, xfer->mps);
+			return -ENOTSUP;
+		}
+
+		if (!IS_ALIGNED(xfer->buf->data, 4)) {
+			LOG_ERR("Interrupt OUT buffer data %p is not 4-byte aligned",
+				xfer->buf->data);
+			return -EINVAL;
+		}
 	}
 
 	return 0;
@@ -2641,7 +2795,13 @@ static int submit_xfer(const struct device *const dev, struct uhc_transfer *cons
 		break;
 	case USB_EP_TYPE_INTERRUPT:
 		ch_schedule_interrupt(dev, ch);
-		ch_start_interrupt(dev, ch);
+		if (ch->do_split) {
+			/* Wait for the scheduled Y0 microframe before starting SSPLIT. */
+			ch->data->periodic_start_pending = true;
+		} else {
+			/* Direct transfers can start immediately. */
+			ch_start_interrupt(dev, ch);
+		}
 		break;
 	default:
 		LOG_ERR("Start channel with type %d isn't supported yet", xfer->type);

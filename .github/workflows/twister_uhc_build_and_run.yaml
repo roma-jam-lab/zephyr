@@ -14,8 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # platform: [esp32s3, nrf54lm20]
-        platform: [esp32s3]
+        platform: [esp32s3, nrf54lm20]
         zephyr_ver: ["v0.29.2"]
         test_name: ["control"]
 
